@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.2** · single file, `knob_os.ino`, ~6,500 lines
+**Current version: 10.3** · single file, `knob_os.ino`, ~6,500 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -279,6 +279,12 @@ is the entire reason Spotify Web API integration exists. Local transport verbs
   last `artists` before it is the track's list rather than the album's. This is
   a key-ordering assumption and is the fragile part.
 - 404 on a transport call is `NO_ACTIVE_DEVICE`, not a failure.
+- **The album name is found backwards.** Reading forward from `album` finds the
+  album ARTIST's name, since inside the album object the keys run album_type,
+  artists, ..., name. The album's own name is the last `"name"` between the
+  `album` key and the track's own `artists`. Bounded at the front by `album` so
+  an item without one (a podcast episode) cannot walk back into `device` and
+  report the speaker's name as the album.
 
 ### TLS memory — read this before touching anything Spotify
 
@@ -340,7 +346,8 @@ cloud. **Runs without a speaker** as a pure Spotify remote, and without Spotify
 as a pure volume knob.
 
 With no speaker the knob seeks rather than driving a volume bar that has
-nothing behind it, and the progress block takes the freed bottom third. Two
+nothing behind it, and the progress block takes the freed bottom third, with
+the artist pushed down a line and the album in the gap under the title. Two
 rates (Knob Rate A, Knob Rate B while the shaft is held), acceleration opt-in
 per rate, local sweep with the resting position sent 400ms after the knob
 stops. `Settings → Speaker → Knob` forces `Auto | Volume | Progress`.

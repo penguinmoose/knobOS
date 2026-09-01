@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.2**
+**Current version: 10.3**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -144,7 +144,9 @@ instant you pause rather than waiting for the cloud to confirm.
 
 **With no speaker, the knob seeks instead.** A volume bar with nothing behind
 it is a control that does nothing, so it goes, and the progress block takes the
-bottom third of the screen at twice the bar height. One detent moves the
+bottom third of the screen at twice the bar height. The artist moves down a
+line and the album takes the gap under the title, so the layout is title,
+album, artist, progress. One detent moves the
 playhead by Knob Rate A, or Knob Rate B while the shaft button is held (the
 same two-rate arrangement as the mixer fader, and B may be the larger of the
 two). Acceleration is opt-in per rate, so spinning fast covers more ground.

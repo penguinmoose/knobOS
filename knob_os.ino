@@ -15,12 +15,12 @@
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 10.2                        (changelog in CHANGELOG.md)
+ *  KNOB OS  --  version 10.3                        (changelog in CHANGELOG.md)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "10.2"
+#define KNOB_OS_VERSION "10.3"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -358,7 +358,7 @@ static int32_t spCfgKnobMode  = 0;     // 0 Auto, 1 Volume, 2 Progress
 static int32_t spCfgScrubA    = 5000;  // ms of track per detent
 static int32_t spCfgScrubB    = 30000; // ...while the shaft button is held
 static int32_t spCfgScrubAcc  = 1;     // 0 off, 1 rate A, 2 rate B, 3 both
-static int32_t spCfgBottom    = 0;     // 0 = volume on turn, 1 = always volume
+static int32_t spCfgBottom    = 0;     // progress block: 0 show, 1 hide
 static int32_t spCfgVolHold   = 4;     // seconds the volume overlay lingers
 static int32_t spCfgSyPoll    = 4000;  // Spotify metadata poll interval
 static int32_t spCfgTransport = 0;     // 0 = Spotify Web, 1 = Sony local, 2 = off
@@ -3907,6 +3907,7 @@ static char  syAccess[420] = "";
 static uint32_t syTokenGot = 0, syTokenTtl = 0;
 char  syTitle[110] = "";
 static char syArtist[80] = "";
+static char syAlbum[80]  = "";
 static bool  syIsPlaying = false;
 bool  syHasTrack = false;
 static int   syProgressMs = 0, syDurationMs = 0;
@@ -4263,7 +4264,7 @@ static int syRequest(const char *method, const char *path, bool wantBody) {
  * the track name unambiguously, and the last `artists` before it is the
  * track's own artist list rather than the album's.                          */
 static void syParsePlayer(const char *r) {
-  syTitle[0] = syArtist[0] = 0;
+  syTitle[0] = syArtist[0] = syAlbum[0] = 0;
 
   int n;
   if (!syLocalActive()) {
@@ -4282,6 +4283,24 @@ static void syParsePlayer(const char *r) {
   cjStr(dv, nullptr, "name", syTitle, sizeof(syTitle));
   const char *ar = cjLast(r, dv, "artists");
   if (ar) cjStr(ar, dv, "name", syArtist, sizeof(syArtist));
+
+  /* The album name is the last "name" before the track's own `artists`.
+   * Reading forward from `album` instead would find the album ARTIST's name:
+   * inside the album object the keys run album_type, artists, ..., name, so
+   * the artist list and its names come first. Working backwards from the
+   * track's artists lands on the album's own name, since nothing between the
+   * two (release_date, total_tracks, type, uri) carries one.
+   *
+   * Bounded at the front by the `album` key so the search cannot walk back
+   * into `device` or `context` on an item that has no album at all -- a
+   * podcast episode would otherwise show the speaker's name as its album.
+   * "album_type" does not match: the scanner wants the whole quoted token
+   * followed by a colon, which also rules out "album" appearing as a value. */
+  const char *ab = ar ? cjFind(r, ar, "album") : nullptr;
+  if (ab) {
+    const char *al = cjLast(ab, ar, "name");
+    if (al) cjStr(al, ar, "name", syAlbum, sizeof(syAlbum));
+  }
 
   syHasTrack = syTitle[0] != 0;
 }
@@ -5173,7 +5192,12 @@ static void fmtClock(char *b, size_t n, int sec, bool neg) {
  * With no volume to show, that bottom third is not left empty -- the progress
  * block takes it, at twice the bar height and with the clocks moved clear of
  * it. A volume bar with nothing behind it was worse than useless: it read as
- * a working control. */
+ * a working control.
+ *
+ * The space also buys a row: the artist moves down one line and the album
+ * takes the gap between it and the title. That row is worth more than the
+ * status line it replaces, which spent its life announcing a speaker that was
+ * not there -- something the absent volume bar already says. */
 static void spaDraw() {
   bool showVol = spkIpSet() && !spaKnobProgress();
   int shown = (spaTarget >= 0) ? spaTarget : spkVol;
@@ -5201,12 +5225,17 @@ static void spaDraw() {
                  : !wifiOnline() ? "Wi-Fi offline"
                  : (spkIpSet() && !spkLinkOk() && showVol) ? "speaker no response"
                  : spkMute ? "MUTED" : "";
-  drawRowText(12, a2);
+  // Album only where there is a row for it; with the volume bar there is not.
+  if (!showVol) drawRowText(12, syAlbum);
+  drawRowText(showVol ? 12 : 24, a2);
 
-  if (syDurationMs > 0) {
+  /* spCfgBottom had a settings row and a stored value but nothing ever read
+   * it, so "Progress: Hide" did nothing at all. Default is Show, so honouring
+   * it changes nothing for anyone who had not gone looking for it. */
+  if (syDurationMs > 0 && spCfgBottom == 0) {
     int pos = syProgressNow();
-    int barY = showVol ? 25 : 30, barH = showVol ? 4 : 8;
-    int clkY = showVol ? 31 : 42;
+    int barY = showVol ? 25 : 42, barH = showVol ? 4 : 8;
+    int clkY = showVol ? 31 : 54;
     drawBar(0, barY, CONTENT_W, barH, (float)pos / syDurationMs);
 
     /* Both clocks are derived from the same elapsed-second value, so they
@@ -5232,17 +5261,8 @@ static void spaDraw() {
     }
   }
 
-  // ---- bottom: volume, or what the knob is doing instead ---------------
+  // ---- bottom: volume, or nothing at all -------------------------------
   if (!showVol) {
-    /* While scrubbing this says which rate is engaged, because the two can be
-     * configured far enough apart that the difference is not obvious from the
-     * playhead alone. */
-    const char *msg = spaScrub ? (spaScrubB ? "Rate B" : "Rate A")
-                    : !spkIpSet() ? "No speaker - Spotify only"
-                    : !spaSpkPresent() ? "Speaker offline - knob seeks"
-                    : spaScrubArmed() ? "Knob seeks"
-                    : "";
-    if (msg[0]) drawRowText(54, msg);
     display.fillRect(CONTENT_W, 0, SCREEN_W - CONTENT_W, SCREEN_H, SH110X_BLACK);
     Glyph mid2 = (spaCentreMode() == 2) ? (spaIsPlaying() ? G_PAUSE : G_PLAY)
                                         : G_SPEAKER;

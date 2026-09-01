@@ -1,6 +1,6 @@
 # Changelog
 
-**Current version: 10.2**
+**Current version: 10.3**
 
 Major version = a new mini-app or a new subsystem. Minor version = tweaks, bug fixes, UI work.
 
@@ -481,3 +481,11 @@ A speaker that is merely switched off now counts as absent. That reverses the v1
 The bottom line distinguishes the three cases — no address, address but offline, and seeking by choice — because a missing volume bar otherwise reads as a fault rather than an answer. The artist row stops duplicating it.
 
 Still open: the speaker address itself is global, unlike the console address, so away from home the device keeps polling an IP that belongs to another network. The backoff limits that to a request every eight seconds or so, but the address wants the same per-SSID treatment the mixer got in v10.0.
+
+### v10.3
+
+The status line under the progress bar is gone. It spent its life announcing a speaker that was not there, which the absent volume bar already says, and the row is worth more as information about the music.
+
+So the no-speaker layout is now title, album, artist, progress: the artist moves down a line and the album takes the gap under the title. The album name has to be found backwards. Reading forward from `album` lands on the album ARTIST's name, since inside the album object the keys run album_type, artists, ..., name; the album's own name is the last `"name"` between the `album` key and the track's own `artists`. Bounded at the front by that key, so an item with no album at all — a podcast episode — cannot walk back into `device` and report the soundbar's name as the album. Verified against a pretty-printed sample, multiple album artists, an episode, and `"album_type" : "album"`, whose value must not be mistaken for the key.
+
+Also wired up spCfgBottom. "Progress: Show | Hide" had a settings row and a stored value that nothing ever read, so the setting did nothing; the documentation described it as working. Default is Show, so honouring it changes nothing for anyone who had not gone looking.
