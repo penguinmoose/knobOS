@@ -8,7 +8,7 @@ console over OSC, a **Sony HT-NT5** soundbar over Sony's local HTTP API, and
 **Spotify** over the Web API — with a nav stack, a settings system, persistent
 configuration, battery monitoring and sleep.
 
-**Current version: 9.9** · single file, `knob_os.ino`, ~6,450 lines.
+**Current version: 10.0** · single file, `knob_os.ino`, ~6,700 lines.
 
 <!-- Screenshot / photo strip goes here -->
 
@@ -82,8 +82,9 @@ entered on the device and stored in NVS.
 
 1. **Wi-Fi** — Settings → Wi-Fi → Scan, pick a network, type the password with
    the on-screen text entry. Saved networks are remembered and reconnected.
-2. **Mixer** — Settings → Mixer → Manual IP, or turn on Demo Mode to drive the
-   real UI from a simulated console with no hardware present.
+2. **Mixer** — Settings → Mixer → IP, or turn on Demo Mode to drive the real
+   UI from a simulated console with no hardware present. **The console address
+   is stored per Wi-Fi network** — see below.
 3. **Speaker** — Settings → Speaker → Scan (SSDP discovery), or Manual IP.
 4. **Spotify** — see [SPOTIFY_SETUP.md](SPOTIFY_SETUP.md). Five minutes, needs
    a Spotify **Premium** account and a free developer app. You never type the
@@ -93,6 +94,28 @@ entered on the device and stored in NVS.
 Speaker Control works **without** a speaker (as a pure Spotify remote) and
 **without** Spotify (as a pure volume knob). Neither is a prerequisite for the
 other.
+
+### The console address is per network
+
+A mixing console lives on one network. A single global address meant carrying
+a venue's IP onto the home network, where it points at nothing but still reads
+as configured — so the mixer app would open, draw a working fader, and send
+OSC into the void.
+
+Addresses are therefore keyed by SSID, and the live one is adopted whenever
+the network changes. On a network with no address the link stays off the wire
+entirely and the mixer behaves exactly as it does when nothing has ever been
+set up: straight to the IP screen, with the Demo button there.
+
+**Settings → Mixer → Networks...** lists every network the device knows about
+with the address for each. The list is assembled from the network you are on,
+the saved networks, and any stored address belonging to neither — so an
+address outlives its network being forgotten and can still be cleared.
+
+> **Upgrading from 9.x:** the single address you had is migrated at boot onto
+> the most recently *saved* network, because which one it belonged to was
+> never recorded. Check **Settings → Mixer → Networks...** and move it if the
+> guess was wrong.
 
 ---
 
@@ -125,6 +148,10 @@ instant you pause rather than waiting for the cloud to confirm.
 ticks. Turn to move the fader; the shaft button switches to a second,
 independent rate — which may be *larger* than the first, making hold a coarse
 mode rather than a fine one. Acceleration is opt-in per rate.
+
+With no Wi-Fi, entering the mixer offers **Demo Mode...** on the Wi-Fi screen
+itself: with no network there is no console either, so the simulator is the
+only thing it can actually do from there.
 
 **Demo Mode** drives the whole real UI from a local console model, intercepted
 at the transport layer. No UI code has demo branches.
@@ -210,9 +237,25 @@ frame; screens wanting the full panel call `uiWide()` from their `draw()`.
 
 ### Settings
 
-Declarative `CfgItem` rows (int, bool, enum, action, link) in `CfgPage` tables,
-rendered by one generic page renderer. Persistence is NVS with debounced writes
-(~1.5 s), ~80 keys.
+Declarative `CfgItem` rows (int, bool, enum, checkbox, action, link) in
+`CfgPage` tables, rendered by one generic page renderer. Persistence is NVS
+with debounced writes (~1.5 s), ~80 keys.
+
+Three things the row type carries beyond a value:
+
+- **`C_CHECK`** toggles on select instead of opening an edit mode. Dropping
+  into one to change a two-state value you can already see buys nothing, and a
+  two-option dropdown would misrepresent independent options as alternatives.
+- **`visible()`** hides a row entirely. A setting that only means something in
+  one mode is absent in the others rather than sitting there doing nothing —
+  `sel` counts *visible* rows, and every access goes through `cfgItemAt()`.
+- **`dynLabel()`** renames a row at runtime, for one that opens different
+  things at different times and should say which.
+
+Every page repeats its row count as a literal, and forgetting to bump it on
+adding a row silently hides that row — a mistake this project made more than
+once. Each page declaration is now followed by a `static_assert` tying the
+literal to its array, so the next one is a build error instead.
 
 Buttons have a **Stuck Cut**: a button held longer than a threshold (default
 10 s) is treated as pressure rather than intent and ignored entirely until
@@ -231,6 +274,14 @@ indicator.
 - **Meter mode** colours each pixel by *its own* position on the scale, not by
   the current level. That is what makes it read like a console meter rather
   than a bar that changes colour.
+- **Auto mode** picks fader or meter *per frame* rather than making it a mode
+  you have to remember to switch. Two independent conditions under
+  Settings → NeoPixel → Mixer → Auto mode: show the fader just after a turn
+  (for a configurable Fader Hold), and show the fader while the channel is
+  quiet. Independent rather than a choice, because wanting the fader while
+  adjusting and wanting it on a silent channel are unrelated reasons and any
+  combination is sensible. A strip with no meter at all (MAIN, DCAs) counts as
+  quiet, since the alternative there is an unlit ring.
 - RGB/HSV colour editor with live preview; origin and reverse settings so the
   ring can be mounted any way round without rewiring.
 
@@ -244,6 +295,10 @@ bolt, warnings at 20% and 10%.
 exactly where it was. Deep sleep is offered for storage but can only wake on
 the shaft button — GPIO 33 and 38 are outside the S2's RTC range (0–21) and
 physically cannot wake the chip.
+
+Both wake sources are *level* triggered, so a button still held when sleep
+begins is not a press waiting to happen — it is the wake condition already
+true. Sleep therefore waits for every armed button to come up first.
 
 Flat-battery shutdown wakes on the **charger line**, not a timer. Polling to
 re-check the level would spend energy from an already flat pack and could not

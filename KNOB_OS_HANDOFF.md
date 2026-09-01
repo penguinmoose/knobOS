@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 9.9** · single file, `knob_os.ino`, ~6,450 lines
+**Current version: 10.0** · single file, `knob_os.ino`, ~6,700 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -163,6 +163,12 @@ Four (`B_C`, `B_B`, `B_A`, `B_ENC`). Events: press, repeat, release.
 - **`btnSelect()`** — generic screens treat the shaft click as another select.
   Apps that give it their own meaning (Speaker, Mixer, Text, Encoder Test)
   handle `B_ENC` themselves.
+- **Both sleep wake sources are LEVEL triggered.** A button still down when
+  sleep begins is not a press waiting to happen — it is the wake condition
+  already true, and the device wakes on the instant it sleeps. Both paths wait
+  for every armed pin to come up (`sleepWaitRelease`). The wake guard cannot
+  help here: that fault is being awake and correctly ignoring the button,
+  which is not the same as never having slept.
 - **Wake guard**: after waking, input is ignored until *every* button is
   released. Armed in `sleepResume()` for light sleep and in `setup()` from the
   wakeup cause for deep sleep (deep sleep resumes through a fresh boot, so
@@ -191,9 +197,24 @@ rows feels broken).
 
 ### Settings
 
-Declarative `CfgItem` rows (int, bool, enum, action, link) in `CfgPage`
-tables. **The page's item count is a separate literal — always update it when
-adding a row**, or the new row is invisible. This has bitten repeatedly.
+Declarative `CfgItem` rows (int, bool, enum, **check**, action, link) in
+`CfgPage` tables. The page's item count is a separate literal that has to
+match the array; forgetting it silently hides the new row, which bit
+repeatedly. Every page declaration now carries a `static_assert` tying the two
+together, so it is a build error instead. `PageWifi` is the one exception —
+its length is set at runtime by `wfEnter()` — and its assert checks the array
+instead.
+
+Three optional hooks beyond the value:
+
+- `C_CHECK` — a bool that toggles on select rather than opening an edit mode.
+  For independent options, where a two-item dropdown would wrongly present
+  them as alternatives.
+- `visible()` — the row is absent while it returns false. **`sel` counts
+  VISIBLE rows**, so every access goes through `cfgItemAt()`; never index
+  `items[]` with `sel` directly.
+- `dynLabel()` — runtime label, for a row that opens different things at
+  different times.
 
 Persistence is NVS with debounced writes (~1.5s). Keys are ≤15 chars and must
 be unique; there are ~80.
@@ -203,6 +224,15 @@ be unique; there are ~80.
 ## 4. Devices and protocols
 
 ### Midas M32R (mixer) — UDP OSC, port 10023
+- **The console address is per SSID**, not global. `mxCfgIp` is the address
+  for the network currently joined, adopted by `mxNetService()` (polled once a
+  second — `WiFi.SSID()` builds a String, so not per loop pass) from a table
+  keyed by SSID. Keyed by name and not by saved-network index, because that
+  list reorders on every connect. With no entry the link stays entirely off
+  the wire and the launch gate behaves as if nothing were configured.
+  `mxNetMigrate()` runs once at boot to rescue a pre-10.0 global address;
+  it cannot run on first connect, because the first adopt would zero and flush
+  the only copy first.
 - `/xremote` resubscribe every ~4s.
 - Fader is 0..1 with a piecewise taper (0.75 = 0 dB).
 - `/meters/0` = 70 little-endian floats: `[0..31]` ch, `[32..39]` aux,
@@ -387,6 +417,9 @@ Spotify `...` indicator latched on permanently. Always brace.
 
 ## 7. Known-open items
 
+0. **After upgrading to 10.0, check Settings → Mixer → Networks...** The old
+   single console address is migrated onto the most recently saved network,
+   which is a guess — the network it actually belonged to was never recorded.
 1. ~~**Spotify TLS connect fails with `-1`**~~ — diagnosed and fixed in v9.9.
    The internal heap could not hold mbedTLS's two 16KB record buffers; see the
    TLS memory section in §4. **Needs confirming on hardware:** Speaker info
@@ -421,6 +454,7 @@ Spotify `...` indicator latched on permanently. Always brace.
 | 7.x | **Rotary encoder replaces servo** — large deletion of sync code |
 | 8.x | NeoPixel ring, battery and sleep, PSRAM |
 | 9.x | Power polish, task split, network debugging, mbedTLS heap fix |
+| 10.x | Per-network console address, checkbox rows, conditional rows |
 
 Full per-version changelog is in the comment block at the bottom of
 `knob_os.ino`.

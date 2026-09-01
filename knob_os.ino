@@ -15,12 +15,12 @@
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 9.9                   (full changelog at end of file)
+ *  KNOB OS  --  version 10.0                  (full changelog at end of file)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "9.9"
+#define KNOB_OS_VERSION "10.0"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -48,7 +48,8 @@
  * ######################################################################### */
 
 enum Glyph { G_NONE, G_UP, G_DOWN, G_LEFT, G_RIGHT, G_SELECT, G_SELECT_OPEN,
-             G_PLAY, G_PAUSE, G_NEXT, G_PREV, G_SPEAKER, G_MUTED, G_SUN };
+             G_PLAY, G_PAUSE, G_NEXT, G_PREV, G_SPEAKER, G_MUTED, G_SUN,
+             G_BACK, G_CHECK_ON, G_CHECK_OFF };
 
 enum BtnId { B_C = 0, B_B = 1, B_A = 2, B_ENC = 3, B_COUNT = 4 };
 enum BtnEv { EV_PRESS, EV_REPEAT };
@@ -66,8 +67,11 @@ struct App {
   bool (*onBack)();     // return true if the app consumed the back gesture
 };
 
-// Config row kinds. C_LINK/C_ACT are navigation; the rest are editable values.
-enum CfgType { C_LINK, C_ACT, C_INT, C_BOOL, C_ENUM, C_INFO };
+/* Config row kinds. C_LINK/C_ACT are navigation; the rest are editable values.
+ * C_CHECK is a bool that toggles on select instead of opening an edit mode --
+ * for independent options that are not a choice between alternatives, where a
+ * dropdown of two would misrepresent the relationship. */
+enum CfgType { C_LINK, C_ACT, C_INT, C_BOOL, C_ENUM, C_INFO, C_CHECK };
 
 struct CfgItem {
   const char *label;
@@ -80,6 +84,11 @@ struct CfgItem {
   void (*action)();
   void (*fmt)(char *b, size_t n);   // custom value text, overrides default
   const char *unit;
+  /* Both optional and both added after the fact, so they sit at the end: the
+   * item tables are positional aggregate initialisers and every existing row
+   * leaves these null. */
+  const char *(*dynLabel)();        // runtime label, overrides `label`
+  bool (*visible)();                // row is hidden while this returns false
 };
 
 struct CfgPage {
@@ -100,6 +109,11 @@ struct TextReq {
   void (*onDone)();
 };
 
+/* Each CfgPage repeats its row count as a literal, and forgetting to bump it
+ * on adding a row silently hides that row -- a mistake this project has made
+ * more than once. Every page declaration is followed by a static_assert that
+ * ties the literal to the array, so the next one fails to build instead. */
+
 /* ---- item construction macros (aggregate init must be positional) ------- */
 #define ITEM_LINK(l,a)            { l, C_LINK, nullptr,0,0,0, nullptr,0, &a, nullptr, nullptr, nullptr }
 #define ITEM_LINKF(l,a,f)         { l, C_LINK, nullptr,0,0,0, nullptr,0, &a, nullptr, f, nullptr }
@@ -108,6 +122,9 @@ struct TextReq {
 #define ITEM_BOOL(l,v)            { l, C_BOOL, &(v), 0,1,1, nullptr,0, nullptr,nullptr,nullptr,nullptr }
 #define ITEM_ENUM(l,v,o)          { l, C_ENUM, &(v), 0,(int32_t)(sizeof(o)/sizeof(o[0]))-1,1, o,(uint8_t)(sizeof(o)/sizeof(o[0])), nullptr,nullptr,nullptr,nullptr }
 #define ITEM_INFO(l,f)            { l, C_INFO, nullptr,0,0,0, nullptr,0, nullptr,nullptr, f, nullptr }
+#define ITEM_CHECK(l,v)           { l, C_CHECK,&(v), 0,1,1, nullptr,0, nullptr,nullptr,nullptr,nullptr }
+#define ITEM_LINKD(l,a,lf)        { l, C_LINK, nullptr,0,0,0, nullptr,0, &a, nullptr, nullptr, nullptr, lf }
+#define ITEM_LINKX(l,a,vis)       { l, C_LINK, nullptr,0,0,0, nullptr,0, &a, nullptr, nullptr, nullptr, nullptr, vis }
 
 /* ###########################################################################
  * #                        FIXED HARDWARE CONFIG                            #
@@ -122,6 +139,11 @@ static bool btnSelect(BtnId b);
 static bool gIpAllowDemo = false;   // Demo button only offered for the mixer
 static int  ipField = 0;            // 0 digits, 1 Demo, 2 Clear
 static void (*gIpDemo)() = nullptr;
+/* Called whenever the value is written, by either route. Commit and Clear
+ * both change the address, so a caller that mirrors it somewhere else has to
+ * hear about both -- otherwise clearing an address looks like it worked and
+ * comes back on the next lookup. */
+static void (*gIpApply)() = nullptr;
 
 /* Rotary encoder. Works with a bare EC11 or with a KY-040 style breakout.
  *
@@ -254,7 +276,14 @@ static int32_t npOrigin    = 0;     // which physical pixel is the scale start
 static int32_t npReverse   = 0;     // flip sweep direction
 static int32_t npStep      = 10;    // colour editor coarse step
 
-static int32_t npMxMode    = 1;     // 0 off, 1 fader, 2 meter
+static int32_t npMxMode    = 1;     // 0 off, 1 fader, 2 meter, 3 auto
+/* Auto mode: meter by default, fader when one of these says so. Two
+ * independent conditions rather than a choice between them, since wanting the
+ * fader while turning and wanting it on a silent channel are unrelated
+ * reasons and either, both or neither is a sensible setting. */
+static int32_t npMxAutoTurn  = 1;   // show the fader just after a turn
+static int32_t npMxAutoQuiet = 1;   // show the fader while nothing is playing
+static int32_t npMxAutoHold  = 20;  // how long the turn lasts, x100ms
 static int32_t npMxFadCol  = 0x0080FF;
 static int32_t npMxRbCol   = 0xC040FF;
 static int32_t npMxZones   = 3;
@@ -355,6 +384,8 @@ static const NvKey NVKEYS[] = {
   { "npMxT2",&npMxT2, 65 },       { "npMxT3", &npMxT3, 88 },
   { "npMxT4",&npMxT4, 97 },       { "npMxC",  &npMxClip, 1 },
   { "npMxE", &npMxEnds, 1 },      { "npMxW",  &npMxWarnCol, 0xFF0000 },
+  { "npMxAT",&npMxAutoTurn, 1 },  { "npMxAQ", &npMxAutoQuiet, 1 },
+  { "npMxAH",&npMxAutoHold, 20 },
   { "npSpM", &npSpMode, 1 },      { "npSpC",  &npSpCol, 0x00A0FF },
   { "npSpE", &npSpEnds, 1 },      { "npSpW",  &npSpWarnCol, 0xFF0000 },
   { "btSlp", &batSleepMin, 5 },   { "btMode", &batSleepMode, 0 },
@@ -505,6 +536,81 @@ static void nvNetGet(int i, char *ssid, size_t sn, char *pass, size_t pn) {
   prefs.end();
 }
 
+/* ---- mixer IP per network ------------------------------------------------
+ *
+ * A console lives on one network. Storing a single mixer IP meant carrying a
+ * venue's address onto the home network, where it points at nothing but still
+ * reads as configured -- so the mixer app opened, drew a fader, and quietly
+ * sent OSC into the void. Keying the address by SSID makes "no mixer here"
+ * a state the device can actually be in.
+ *
+ * Keyed by SSID rather than by an index into the saved-network list, because
+ * that list reorders itself on every connect. */
+static int nvMixNetCount() {
+  prefs.begin("knobos", true);
+  int n = prefs.getInt("mnN", 0);
+  prefs.end();
+  return constrain(n, 0, MAX_SAVED_NETS);
+}
+
+static void nvMixNetGet(int i, char *ssid, size_t sn, int32_t *ip) {
+  char ks[8], ki[8];
+  snprintf(ks, sizeof(ks), "mns%d", i);
+  snprintf(ki, sizeof(ki), "mni%d", i);
+  prefs.begin("knobos", true);
+  if (ssid) prefs.getString(ks, ssid, sn);
+  if (ip) *ip = prefs.getInt(ki, 0);
+  prefs.end();
+}
+
+static int32_t nvMixNetFind(const char *ssid) {
+  if (!ssid || !ssid[0]) return 0;
+  int n = nvMixNetCount();
+  for (int i = 0; i < n; i++) {
+    char es[33];
+    int32_t ip = 0;
+    es[0] = 0;
+    nvMixNetGet(i, es, sizeof(es), &ip);
+    if (es[0] && !strcmp(es, ssid)) return ip;
+  }
+  return 0;
+}
+
+/* An address of 0 means "no mixer on this network", which is a real answer
+ * and worth storing -- otherwise clearing one would silently fall back to
+ * whatever the previous single global value happened to be. */
+static void nvMixNetSet(const char *ssid, int32_t ip) {
+  if (!ssid || !ssid[0]) return;
+  char s[MAX_SAVED_NETS][33];
+  int32_t v[MAX_SAVED_NETS];
+  int n = nvMixNetCount(), out = 0;
+
+  strncpy(s[0], ssid, 32); s[0][32] = 0;
+  v[0] = ip;
+  out = 1;
+  for (int i = 0; i < n && out < MAX_SAVED_NETS; i++) {
+    char es[33];
+    int32_t eip = 0;
+    es[0] = 0;
+    nvMixNetGet(i, es, sizeof(es), &eip);
+    if (!es[0] || !strcmp(es, ssid)) continue;      // dedupe
+    strncpy(s[out], es, 32); s[out][32] = 0;
+    v[out] = eip;
+    out++;
+  }
+
+  prefs.begin("knobos", false);
+  prefs.putInt("mnN", out);
+  for (int i = 0; i < out; i++) {
+    char ks[8], ki[8];
+    snprintf(ks, sizeof(ks), "mns%d", i);
+    snprintf(ki, sizeof(ki), "mni%d", i);
+    prefs.putString(ks, s[i]);
+    prefs.putInt(ki, v[i]);
+  }
+  prefs.end();
+}
+
 static void nvNetRemember(const char *ssid, const char *pass) {
   if (!ssid[0]) return;
   char s[MAX_SAVED_NETS][33], p[MAX_SAVED_NETS][65];
@@ -581,6 +687,25 @@ static void drawGlyph(int cx, int cy, Glyph g, uint16_t col = SH110X_WHITE) {
       break;
     case G_SELECT:      display.fillCircle(cx, cy, 3, col); break;
     case G_SELECT_OPEN: display.drawCircle(cx, cy, 3, col); break;
+    /* A return arrow, not a left chevron. "<" is the same shape this UI uses
+     * for "move left", so on a screen where the bottom button leaves rather
+     * than moves it read as a direction instead of an action. */
+    case G_BACK:
+      display.drawFastHLine(cx - 3, cy + 1, 7, col);
+      display.drawFastVLine(cx + 3, cy - 3, 5, col);
+      display.drawLine(cx - 3, cy + 1, cx, cy - 2, col);
+      display.drawLine(cx - 3, cy + 1, cx, cy + 4, col);
+      break;
+    case G_CHECK_OFF:
+      display.drawRect(cx - 4, cy - 4, 9, 9, col);
+      break;
+    case G_CHECK_ON:
+      display.drawRect(cx - 4, cy - 4, 9, 9, col);
+      display.drawLine(cx - 2, cy, cx - 1, cy + 2, col);
+      display.drawLine(cx - 1, cy + 2, cx + 2, cy - 2, col);
+      display.drawLine(cx - 2, cy + 1, cx - 1, cy + 3, col);
+      display.drawLine(cx - 1, cy + 3, cx + 2, cy - 1, col);
+      break;
     case G_PLAY:
       display.fillTriangle(cx - 3, cy - 4, cx - 3, cy + 4, cx + 4, cy, col);
       break;
@@ -877,6 +1002,30 @@ static void sleepResume() {
   batNoteActivity();
 }
 
+/* Nothing may be held when sleep begins.
+ *
+ * Both wake sources are LEVEL triggered, not edge: a button that is still
+ * down when the CPU stops is not a press waiting to happen, it is the wake
+ * condition already true. Deep sleep waited for the shaft button because that
+ * is its only wake pin; light sleep arms all four and waited for none of
+ * them, so holding the select button a moment too long woke the device on the
+ * instant it slept. The wake guard could not help -- the device was awake and
+ * correctly ignoring the button, which is a different problem from never
+ * having slept.
+ *
+ * The cap exists so a genuinely stuck button cannot block sleep forever; it
+ * will wake straight back up, which is the honest outcome. */
+static void sleepWaitRelease(const int *pins, int n) {
+  uint32_t t0 = millis();
+  for (;;) {
+    bool held = false;
+    for (int i = 0; i < n; i++) if (digitalRead(pins[i]) == LOW) held = true;
+    if (!held || millis() - t0 > 5000) break;
+    delay(10);
+  }
+  delay(60);                          // let the contact settle
+}
+
 static void enterSleep(bool fromMenu, bool forceDeep = false) {
   rtcGoHome = fromMenu ? 1 : 0;
   navSaveNow();
@@ -890,6 +1039,7 @@ static void enterSleep(bool fromMenu, bool forceDeep = false) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     const int pins[4] = { PIN_BTN_A, PIN_BTN_B, PIN_BTN_C, PIN_ENC_SW };
+    sleepWaitRelease(pins, 4);        // all four wake it, so all four must be up
     for (int i = 0; i < 4; i++)
       gpio_wakeup_enable((gpio_num_t)pins[i], GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
@@ -912,9 +1062,8 @@ static void enterSleep(bool fromMenu, bool forceDeep = false) {
    * still down at this point, so wait for it to come up first. */
   rtc_gpio_pullup_en((gpio_num_t)PIN_ENC_SW);
   rtc_gpio_pulldown_dis((gpio_num_t)PIN_ENC_SW);
-  uint32_t t0 = millis();
-  while (digitalRead(PIN_ENC_SW) == LOW && millis() - t0 < 5000) delay(10);
-  delay(60);                                   // let the contact settle
+  const int deepPin[1] = { PIN_ENC_SW };
+  sleepWaitRelease(deepPin, 1);       // ext0 is the shaft button alone
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ENC_SW, 0);
   esp_deep_sleep_start();
 }
@@ -1422,6 +1571,7 @@ static void cfgValueText(const CfgItem *it, char *buf, size_t n) {
     case C_BOOL:
       snprintf(buf, n, "%s", *it->val ? "On" : "Off");
       break;
+    case C_CHECK: break;              // the tick box in the tail says it
     case C_ENUM: {
       int32_t v = constrain(*it->val, 0, (int32_t)it->nopts - 1);
       snprintf(buf, n, "%s", it->opts[v]);
@@ -1435,12 +1585,39 @@ static bool cfgEditable(const CfgItem *it) {
   return it->type == C_INT || it->type == C_BOOL || it->type == C_ENUM;
 }
 
+/* ---- conditional rows ---------------------------------------------------
+ * A row whose `visible` hook returns false is skipped entirely, so a setting
+ * that only means something in one mode does not sit there greyed out or,
+ * worse, quietly doing nothing. `sel` therefore counts VISIBLE rows, and
+ * every access goes through cfgItemAt(). The mapping is recomputed per use
+ * rather than cached: pages are at most a couple of dozen rows and the hooks
+ * are single comparisons, so there is nothing to gain by holding state that
+ * could go stale the moment the mode it depends on changes. */
+static bool cfgShown(const CfgItem *it) { return !it->visible || it->visible(); }
+
+static int cfgVisN(const CfgPage *p) {
+  int n = 0;
+  for (int i = 0; i < p->n; i++) if (cfgShown(&p->items[i])) n++;
+  return n;
+}
+
+static const CfgItem *cfgItemAt(const CfgPage *p, int k) {
+  if (k < 0) return nullptr;
+  for (int i = 0; i < p->n; i++)
+    if (cfgShown(&p->items[i]) && k-- == 0) return &p->items[i];
+  return nullptr;
+}
+
+static const char *cfgLabel(const CfgItem *it) {
+  return it->dynLabel ? it->dynLabel() : it->label;
+}
+
 // Long enum labels crowd the row, so those open a full-screen picker instead.
 static bool cfgNeedsDropdown(const CfgItem *it) {
   if (it->type != C_ENUM || !it->opts) return false;
   int w = 0;
   for (int i = 0; i < it->nopts; i++) w = max(w, textW(it->opts[i]));
-  return (textW(it->label) + w + 14) > ROW_W;
+  return (textW(cfgLabel(it)) + w + 14) > ROW_W;
 }
 
 static void cfgAdjust(const CfgItem *it, int steps) {
@@ -1472,34 +1649,43 @@ static void cfgDraw() {
   CfgPage *p = gCfg;
   drawTitle(p->dynTitle ? p->dynTitle() : p->title);
 
+  int n = cfgVisN(p);
+  if (p->sel >= n) p->sel = (uint8_t)max(0, n - 1);
+
   int first = 0;
   if (p->sel >= ROWS_VIS) first = p->sel - ROWS_VIS + 1;
-  if (first > p->n - ROWS_VIS) first = max(0, p->n - ROWS_VIS);
+  if (first > n - ROWS_VIS) first = max(0, n - ROWS_VIS);
 
-  for (int i = 0; i < ROWS_VIS && first + i < p->n; i++) {
+  for (int i = 0; i < ROWS_VIS && first + i < n; i++) {
     int idx = first + i, y = ROW_TOP + i * ROW_H;
-    const CfgItem *it = &p->items[idx];
+    const CfgItem *it = cfgItemAt(p, idx);
+    if (!it) break;
     bool sel = (idx == p->sel);
     char vb[24];
     cfgValueText(it, vb, sizeof(vb));
-    Glyph tail = (it->type == C_LINK) ? G_RIGHT : G_NONE;
-    drawRow(y, sel, sel && p->editing, it->label, vb[0] ? vb : nullptr, tail);
+    Glyph tail = (it->type == C_LINK)  ? G_RIGHT
+               : (it->type == C_CHECK) ? (*it->val ? G_CHECK_ON : G_CHECK_OFF)
+                                       : G_NONE;
+    drawRow(y, sel, sel && p->editing, cfgLabel(it), vb[0] ? vb : nullptr, tail);
   }
-  drawScrollbar(p->n, first);
+  drawScrollbar(n, first);
   drawButtonLabels(G_UP, p->editing ? G_SELECT_OPEN : G_SELECT, G_DOWN);
 }
 
 static void cfgMove(int d) {
   if (!gCfg || !gCfg->n) return;
+  int n = cfgVisN(gCfg);
+  if (!n) return;
   int s = (int)gCfg->sel + d;
-  gCfg->sel = (uint8_t)constrain(s, 0, (int)gCfg->n - 1);
+  gCfg->sel = (uint8_t)constrain(s, 0, n - 1);
 }
 
 static void cfgActivate();   // defined after the dropdown app
 
 static void cfgButton(BtnId b, BtnEv e) {
   if (!gCfg || !gCfg->n) return;
-  const CfgItem *it = &gCfg->items[gCfg->sel];
+  const CfgItem *it = cfgItemAt(gCfg, gCfg->sel);
+  if (!it) return;
   if (gCfg->editing) {
     if (b == B_C) cfgAdjust(it, +1);
     else if (b == B_A) cfgAdjust(it, -1);
@@ -1513,7 +1699,8 @@ static void cfgButton(BtnId b, BtnEv e) {
 
 static void cfgKnob(int steps) {
   if (!gCfg || !gCfg->n || !steps) return;
-  const CfgItem *it = &gCfg->items[gCfg->sel];
+  const CfgItem *it = cfgItemAt(gCfg, gCfg->sel);
+  if (!it) return;
   bool edits = gCfg->editing || (sysKnobEdit == 0 && cfgEditable(it));
   if (edits) cfgAdjust(it, steps);
   else cfgMove(steps > 0 ? +1 : -1);
@@ -1526,7 +1713,7 @@ static void dropEnter() { knobInputMode(); gDropSel = gDropItem ? (uint8_t)const
 
 static void dropDraw() {
   if (!gDropItem) return;
-  drawTitle(gDropItem->label);
+  drawTitle(cfgLabel(gDropItem));
   int n = gDropItem->nopts;
   int first = (gDropSel >= ROWS_VIS) ? gDropSel - ROWS_VIS + 1 : 0;
   for (int i = 0; i < ROWS_VIS && first + i < n; i++) {
@@ -1562,10 +1749,14 @@ static const App AppDropdown = {
 };
 
 static void cfgActivate() {
-  const CfgItem *it = &gCfg->items[gCfg->sel];
+  const CfgItem *it = cfgItemAt(gCfg, gCfg->sel);
+  if (!it) return;
   switch (it->type) {
     case C_LINK: if (it->target) launchApp(it->target); break;
     case C_ACT:  if (it->action) it->action(); break;
+    /* A checkbox toggles on the spot. Dropping into an edit mode to change a
+     * two-state value you can already see is a step that buys nothing. */
+    case C_CHECK: if (it->val) { *it->val = !*it->val; nvTouch(); } break;
     case C_ENUM:
       if (cfgNeedsDropdown(it)) { gDropItem = it; navPush(&AppDropdown); }
       else gCfg->editing = true;
@@ -1849,6 +2040,7 @@ static bool gIpError = false;
 
 static void ipInputBegin(int32_t *target, const char *title, void (*onDone)()) {
   gIpTarget = target; gIpTitle = title; ipField = 0;
+  gIpApply = nullptr;
   uint32_t packed = target ? (uint32_t)*target : 0;
   gIpDone = onDone; gIpError = false; ipCur = 0;
   for (int i = 0; i < 12; i++) ipD[i] = -1;
@@ -1962,6 +2154,7 @@ static void ipCommit() {
   if (ipParse(&packed)) {
     if (gIpTarget) *gIpTarget = (int32_t)packed;
     nvTouch(); nvFlush();
+    if (gIpApply) gIpApply();
     if (gIpDone) gIpDone(); else navBack();
   } else {
     if (gIpTarget) *gIpTarget = 0;
@@ -1974,6 +2167,7 @@ static void ipClear() {
   for (int i = 0; i < 12; i++) ipD[i] = -1;
   if (gIpTarget) *gIpTarget = 0;
   nvTouch(); nvFlush();
+  if (gIpApply) gIpApply();
   ipCur = 0; ipField = 0;
   ipArmKnob();
 }
@@ -2011,6 +2205,7 @@ static const App AppIpInput = {
 
 static const App *gAfterConnect = nullptr;   // resume target once prereqs are met
 static bool gWifiGateway = false;            // Wi-Fi page entered as a gate
+static bool gWifiOfferDemo = false;          // ...and the mixer is what wants it
 static bool gSpkGateway  = false;            // Speaker page entered as a gate
 
 static bool wifiConfigured() { return wifiSsid[0] != 0; }
@@ -2046,6 +2241,7 @@ static void wcTick() {
       const App *t = gAfterConnect;
       gAfterConnect = nullptr;
       gWifiGateway = false;
+      gWifiOfferDemo = false;   // the reason for offering it is gone
       navHome();
       launchApp(t);
     } else navBack();
@@ -2267,9 +2463,12 @@ static char wiSsid[33], wiPass[65];
 
 static void wiEnter() {
   knobInputMode();
-  wiMode = 0;
   wiSel = 0;
   wiCount = nvNetCount();
+  /* Offline, the current-connection page has one thing to say and it is
+   * "no". Opening straight into the history skips a screen whose only
+   * purpose, in that state, is to be scrolled past. */
+  wiMode = (!wifiOnline() && wiCount > 0) ? 1 : 0;
 }
 
 static void wiDrawKV(int y, const char *k, const char *v) {
@@ -2285,8 +2484,10 @@ static void wiDrawCurrent() {
     display.print("No Wi-Fi connected");
     display.setCursor(0, 34);
     display.printf("%d saved network%s", wiCount, wiCount == 1 ? "" : "s");
-    display.setCursor(0, 48);
-    display.print("press v for list");
+    if (wiCount > 0) {
+      display.setCursor(0, 48);
+      display.print("press v for list");
+    }
     return;
   }
   char buf[32];
@@ -2383,20 +2584,42 @@ static const App AppWifiInfo = {
 /* ---- Wi-Fi menu --------------------------------------------------------- */
 static void wifiScanLink() { navPush(&AppWifiScan); }
 
+/* The page behind this row opens on the current connection when there is one
+ * and on the history when there is not, so the row is named for whichever it
+ * will actually show. */
+static const char *wifiInfoLabel() {
+  return wifiOnline() ? "Wi-Fi info" : "Past connections";
+}
+
+static void mixerDemoStart();   // defined with the mixer app
+
 static const CfgItem WIFI_ITEMS[] = {
-  ITEM_ACT ("Scan...",         wifiScanLink),
-  ITEM_ACT ("Manual input...", wifiManualStart),
-  ITEM_LINK("Wi-Fi info",      AppWifiInfo),
+  ITEM_ACT  ("Scan...",         wifiScanLink),
+  ITEM_ACT  ("Manual input...", wifiManualStart),
+  ITEM_LINKD("Wi-Fi info",      AppWifiInfo, wifiInfoLabel),
+  /* Only present when the mixer sent us here for want of a network. Offering
+   * the simulator from a Wi-Fi page in any other context would be a non
+   * sequitur, so PageWifi.n is raised to 4 by wfEnter() and left at 3
+   * otherwise. */
+  ITEM_ACT  ("Demo Mode...",    mixerDemoStart),
 };
 static CfgPage PageWifi = { "Wi-Fi", WIFI_ITEMS, 3, 0, false, wifiTitle };
+/* The only page whose length is decided at runtime: wfEnter() raises n to 4
+ * to reveal the Demo row and drops it back to 3 otherwise, so the literal
+ * above is the floor rather than the count. */
+static_assert(sizeof(WIFI_ITEMS) / sizeof(WIFI_ITEMS[0]) == 4, "PageWifi row count");
 
-static void wfEnter() { cfgOpen(&PageWifi); }
+static void wfEnter() {
+  PageWifi.n = gWifiOfferDemo ? 4 : 3;
+  cfgOpen(&PageWifi);
+}
 
 // When Wi-Fi was entered as a prerequisite for another app, backing out
 // abandons that intent and returns home rather than to Settings.
 static bool wfBack() {
   if (gWifiGateway) {
     gWifiGateway = false;
+    gWifiOfferDemo = false;
     gAfterConnect = nullptr;
     navHome();
     return true;
@@ -2490,6 +2713,55 @@ static int16_t oscI16LE(const uint8_t *b, int o) {
 
 static IPAddress mixerIp() { return IPAddress((uint32_t)mxCfgIp); }
 static bool mixerIpSet() { return mxCfgIp != 0; }
+
+/* mxCfgIp is the address for the network we are on right now, adopted from
+ * the per-SSID table whenever that network changes. It stays an NVS value of
+ * its own so the last one survives a reboot into a Wi-Fi outage rather than
+ * blanking the mixer for want of an SSID to look up. */
+static char mxNetSsid[33] = "";
+
+/* Carry an address configured before this table existed into the table, once,
+ * at boot.
+ *
+ * It has to happen here rather than on the first connect. The first adopt
+ * would otherwise find no entry for that network, set the live address to
+ * zero and flush it -- destroying the only copy of an address the user had
+ * working. Which network it belonged to is not recorded anywhere, so the most
+ * recently saved one is the best available guess; the Networks page shows
+ * where it landed and moving it is one edit. A wrong guess is recoverable,
+ * a deleted address is not. */
+static void mxNetMigrate() {
+  if (!mxCfgIp || nvMixNetCount() || !nvNetCount()) return;
+  char s[33];
+  s[0] = 0;
+  nvNetGet(0, s, sizeof(s), nullptr, 0);
+  if (s[0]) nvMixNetSet(s, mxCfgIp);
+}
+
+static void mxNetAdopt(const char *ssid) {
+  snprintf(mxNetSsid, sizeof(mxNetSsid), "%s", ssid ? ssid : "");
+  int32_t ip = nvMixNetFind(mxNetSsid);
+  if (ip == mxCfgIp) return;
+  mxCfgIp = ip;
+  mlUdpUp = false;          // any socket open for the old address is stale
+  nvTouch();
+}
+
+/* Polled rather than hooked to the connect path: a reconnect, a roam onto a
+ * different SSID and the first association after boot all arrive by different
+ * routes, and all three have to be caught.
+ *
+ * Once a second, not every pass: WiFi.SSID() builds a String, and doing that
+ * a few thousand times a second is exactly the kind of heap churn this board
+ * cannot afford. */
+static uint32_t mxNetMs = 0;
+
+static void mxNetService() {
+  if (!wifiOnline() || !elapsed(mxNetMs, 1000)) return;
+  mxNetMs = millis();
+  String cur = WiFi.SSID();
+  if (cur.length() && strcmp(cur.c_str(), mxNetSsid)) mxNetAdopt(cur.c_str());
+}
 
 static void udpTx(int len) {
   if (mlDemo) return;                    // nothing goes on the wire in demo
@@ -2669,7 +2941,10 @@ static void mlPollUdp() {
 
 static void mlTick() {
   if (mlDemo) { mlDemoTick(); return; }
-  if (!wifiOnline()) { mlUdpUp = false; return; }
+  /* No address for this network is a real state, not a half-configured one:
+   * stay off the wire entirely rather than opening a socket and resubscribing
+   * to a console that is not there. */
+  if (!wifiOnline() || !mixerIpSet()) { mlUdpUp = false; return; }
   if (!mlUdpUp) {
     mlUdpUp = true;
     udp.begin((uint16_t)(mxCfgPort + 1));
@@ -2765,6 +3040,7 @@ static const CfgItem ENC_CFG_ITEMS[] = {
   ITEM_INT ("Hold",       encCfgHoldMs,  500,5000,100, "ms"),
 };
 static CfgPage PageEncCfg = { "Encoder Config", ENC_CFG_ITEMS, 5, 0, false, nullptr };
+static_assert(sizeof(ENC_CFG_ITEMS) / sizeof(ENC_CFG_ITEMS[0]) == 5, "PageEncCfg row count");
 static void ecEnter() { cfgOpen(&PageEncCfg); }
 
 static const App AppEncoderConfig = {
@@ -2777,10 +3053,123 @@ static const CfgItem ENC_ITEMS[] = {
   ITEM_LINK("Configuration", AppEncoderConfig),
 };
 static CfgPage PageEncoder = { "Encoder", ENC_ITEMS, 2, 0, false, nullptr };
+static_assert(sizeof(ENC_ITEMS) / sizeof(ENC_ITEMS[0]) == 2, "PageEncoder row count");
 static void emEnter() { cfgOpen(&PageEncoder); }
 
 static const App AppEncoderMenu = {
   "Encoder", nullptr, emEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
+  nullptr, nullptr
+};
+
+/* ###########################################################################
+ * #                  MIXER ADDRESS PER NETWORK                              #
+ * #                                                                         #
+ * #  One row per network the device knows about, each holding the console   #
+ * #  address to use while connected to it. The list is assembled from three  #
+ * #  sources -- the network we are on, the saved networks, and any stored    #
+ * #  entry belonging to neither -- so an address survives its network being  #
+ * #  forgotten and can still be cleared afterwards.                          #
+ * ######################################################################### */
+
+/* Saved networks and stored addresses can name disjoint sets -- an address
+ * outlives the network being forgotten -- so the list has to hold both. */
+static const int MN_MAX = MAX_SAVED_NETS * 2 + 1;
+static char    mnSsid[MN_MAX][33];
+static int32_t mnIp[MN_MAX];
+static int     mnN = 0, mnSel = 0, mnEdit = -1;
+static int32_t mnScratch = 0;
+
+static void mnAdd(const char *ssid) {
+  if (!ssid || !ssid[0] || mnN >= MN_MAX) return;
+  for (int i = 0; i < mnN; i++) if (!strcmp(mnSsid[i], ssid)) return;
+  snprintf(mnSsid[mnN], sizeof(mnSsid[0]), "%s", ssid);
+  mnIp[mnN] = nvMixNetFind(ssid);
+  mnN++;
+}
+
+static void mnBuild() {
+  mnN = 0;
+  if (wifiOnline()) mnAdd(WiFi.SSID().c_str());
+  int ns = nvNetCount();
+  for (int i = 0; i < ns; i++) {
+    char es[33];
+    es[0] = 0;
+    nvNetGet(i, es, sizeof(es), nullptr, 0);
+    mnAdd(es);
+  }
+  int nm = nvMixNetCount();
+  for (int i = 0; i < nm; i++) {
+    char es[33];
+    es[0] = 0;
+    nvMixNetGet(i, es, sizeof(es), nullptr);
+    mnAdd(es);
+  }
+}
+
+static void mnEnter() { knobInputMode(); mnBuild(); mnSel = constrain(mnSel, 0, max(0, mnN - 1)); }
+
+/* Written on both Commit and Clear, via gIpApply. If the row happens to be
+ * the network we are on, the live address follows immediately -- otherwise
+ * the change would not take effect until the next reconnect. */
+static void mnApply() {
+  if (mnEdit < 0 || mnEdit >= mnN) return;
+  mnIp[mnEdit] = mnScratch;
+  nvMixNetSet(mnSsid[mnEdit], mnScratch);
+  if (!strcmp(mnSsid[mnEdit], mxNetSsid)) {
+    mxCfgIp = mnScratch;
+    mlUdpUp = false;
+    nvTouch();
+  }
+}
+
+static void mnDone() { navBack(); }
+
+static void mnOpen() {
+  if (mnSel < 0 || mnSel >= mnN) return;
+  mnEdit = mnSel;
+  mnScratch = mnIp[mnSel];
+  ipInputBegin(&mnScratch, mnSsid[mnSel], mnDone);
+  gIpAllowDemo = false;
+  gIpDemo = nullptr;
+  gIpApply = mnApply;
+  navPush(&AppIpInput);
+}
+
+static void mnDraw() {
+  drawTitle("Mixer Networks");
+  if (mnN == 0) {
+    display.setCursor(0, 26);
+    display.print("No networks known");
+    display.setCursor(0, 38);
+    display.print("Connect or save one");
+    drawButtonLabels(G_NONE, G_NONE, G_NONE);
+    return;
+  }
+  int first = (mnSel >= ROWS_VIS) ? mnSel - ROWS_VIS + 1 : 0;
+  if (first > mnN - ROWS_VIS) first = max(0, mnN - ROWS_VIS);
+  for (int i = 0; i < ROWS_VIS && first + i < mnN; i++) {
+    int idx = first + i;
+    char v[18];
+    if (mnIp[idx]) snprintf(v, sizeof(v), "%s", IPAddress((uint32_t)mnIp[idx]).toString().c_str());
+    else           snprintf(v, sizeof(v), "none");
+    drawRow(ROW_TOP + i * ROW_H, idx == mnSel, false, mnSsid[idx], v, G_NONE);
+  }
+  drawScrollbar(mnN, first);
+  drawButtonLabels(G_UP, G_SELECT, G_DOWN);
+}
+
+static void mnMove(int d) { mnSel = constrain(mnSel + d, 0, max(0, mnN - 1)); }
+
+static void mnButton(BtnId b, BtnEv e) {
+  if (b == B_C) mnMove(-1);
+  else if (b == B_A) mnMove(+1);
+  else if (btnSelect(b) && e == EV_PRESS) mnOpen();
+}
+
+static void mnKnob(int st) { if (st) mnMove(st > 0 ? +1 : -1); }
+
+static const App AppMixerNets = {
+  "Networks", nullptr, mnEnter, nullptr, nullptr, mnDraw, mnButton, mnKnob,
   nullptr, nullptr
 };
 
@@ -2797,17 +3186,28 @@ static void fmtMixerIp(char *b, size_t n) {
   else snprintf(b, n, "%s", mixerIp().toString().c_str());
 }
 
-static void mixerDemoStart();      // defined with the mixer app
+/* Names the network the address applies to, since it is no longer global. */
+static const char *mixerIpLabel() { return mxNetSsid[0] ? "IP (this net)" : "IP"; }
+
+/* The IP row edits the address for the network we are on, so every write has
+ * to land in the per-SSID table as well. Without this the row would appear to
+ * work and then be overwritten by the table on the next connect. */
+static void mixerIpSync() {
+  if (mxNetSsid[0]) nvMixNetSet(mxNetSsid, mxCfgIp);
+  mlUdpUp = false;
+}
 
 static void mixerIpEdit() {
-  ipInputBegin(&mxCfgIp, "Mixer IP", nullptr);
+  ipInputBegin(&mxCfgIp, mxNetSsid[0] ? mxNetSsid : "Mixer IP", nullptr);
   gIpAllowDemo = true;
   gIpDemo = mixerDemoStart;
+  gIpApply = mixerIpSync;
   navPush(&AppIpInput);
 }
 
 static void mixerIpClear() {
   mxCfgIp = 0;
+  mixerIpSync();
   nvTouch(); nvFlush();
 }
 
@@ -2825,8 +3225,10 @@ static void fmtRateB(char *b, size_t n) {
 
 static const CfgItem MIXER_CFG_ITEMS[] = {
   ITEM_ENUM("Model",     mxCfgModel, OPT_MODEL),
-  ITEM_ACTF("IP",        mixerIpEdit, fmtMixerIp),
+  { "IP", C_ACT, nullptr,0,0,0, nullptr,0, nullptr, mixerIpEdit, fmtMixerIp,
+    nullptr, mixerIpLabel, nullptr },
   ITEM_ACT ("Clear IP",  mixerIpClear),
+  ITEM_LINK("Networks...", AppMixerNets),
   ITEM_ACT ("Demo Mode", mixerDemoStart),
   ITEM_INT ("OSC Port",  mxCfgPort,      1,65535, 1, ""),
   ITEM_ENUM("Enc Btn",   mxCfgEncBtn, OPT_MX_ENC),
@@ -2837,7 +3239,8 @@ static const CfgItem MIXER_CFG_ITEMS[] = {
   ITEM_INT ("User Hold", mxCfgUserHold,100, 3000,50, "ms"),
   ITEM_INT ("Meter Rate",mxCfgMeterRate, 1,   20, 1, ""),
 };
-static CfgPage PageMixerCfg = { "Mixer", MIXER_CFG_ITEMS, 12, 0, false, nullptr };
+static CfgPage PageMixerCfg = { "Mixer", MIXER_CFG_ITEMS, 13, 0, false, nullptr };
+static_assert(sizeof(MIXER_CFG_ITEMS) / sizeof(MIXER_CFG_ITEMS[0]) == 13, "PageMixerCfg row count");
 static void mcEnter() { cfgOpen(&PageMixerCfg); }
 
 static const App AppMixerSettings = {
@@ -4112,6 +4515,7 @@ static const CfgItem SPOTIFY_ITEMS[] = {
   ITEM_ACT  ("Log out",     syActLogout),
 };
 static CfgPage PageSpotify = { "Spotify", SPOTIFY_ITEMS, 6, 0, false, nullptr };
+static_assert(sizeof(SPOTIFY_ITEMS) / sizeof(SPOTIFY_ITEMS[0]) == 6, "PageSpotify row count");
 static void syMenuEnter() { cfgOpen(&PageSpotify); }
 
 static const App AppSpotifyMenu = {
@@ -4142,6 +4546,7 @@ static const CfgItem PLAYBACK_ITEMS[] = {
   ITEM_ENUM("Right", spCfgTimeRight, OPT_TIMER),
 };
 static CfgPage PagePlayback = { "Playback", PLAYBACK_ITEMS, 5, 0, false, nullptr };
+static_assert(sizeof(PLAYBACK_ITEMS) / sizeof(PLAYBACK_ITEMS[0]) == 5, "PagePlayback row count");
 static void pbEnter() { cfgOpen(&PagePlayback); }
 
 static const App AppPlayback = {
@@ -4192,6 +4597,7 @@ static const CfgItem SPEAKER_ITEMS[] = {
   ITEM_LINK("Playback",   AppPlayback),
 };
 static CfgPage PageSpeaker = { "Speaker", SPEAKER_ITEMS, 14, 0, false, spsTitle };
+static_assert(sizeof(SPEAKER_ITEMS) / sizeof(SPEAKER_ITEMS[0]) == 14, "PageSpeaker row count");
 static void spsEnter() { cfgOpen(&PageSpeaker); }
 
 // Entered as a prerequisite gate, backing out returns home, matching Wi-Fi.
@@ -4861,7 +5267,7 @@ NP_COLOR_ROW(npcMxWarn, "Ends Warn", npMxWarnCol, 0, 0)
 NP_COLOR_ROW(npcSpCol,  "Volume",    npSpCol,     0, NEO_N - 1)
 NP_COLOR_ROW(npcSpWarn, "Ends Warn", npSpWarnCol, 0, 0)
 
-static const char *const OPT_NP_MXMODE[] = { "Off", "Fader", "Meter" };
+static const char *const OPT_NP_MXMODE[] = { "Off", "Fader", "Meter", "Auto" };
 static const char *const OPT_NP_SPMODE[] = { "Off", "Volume" };
 static const char *const OPT_NP_CLIP[]   = { "Off", "No Dim", "Full Bright" };
 
@@ -4874,15 +5280,41 @@ static const CfgItem NP_GLOBAL_ITEMS[] = {
   ITEM_INT ("Colour Step",npStep,   1,  50, 1, ""),
 };
 static CfgPage PageNpGlobal = { "NeoPixel Global", NP_GLOBAL_ITEMS, 5, 0, false, nullptr };
+static_assert(sizeof(NP_GLOBAL_ITEMS) / sizeof(NP_GLOBAL_ITEMS[0]) == 5, "PageNpGlobal row count");
 static void npgEnter() { cfgOpen(&PageNpGlobal); }
 static const App AppNpGlobal = {
   "Global", nullptr, npgEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
   nullptr, nullptr
 };
 
+/* ---- mixer: auto-mode rules -------------------------------------------- */
+static void fmtNpAutoHold(char *b, size_t n) {
+  if (!npMxAutoHold) snprintf(b, n, "Off");
+  else snprintf(b, n, "%ld.%lds", (long)(npMxAutoHold / 10),
+                (long)(npMxAutoHold % 10));
+}
+
+static const CfgItem NP_MXAUTO_ITEMS[] = {
+  ITEM_CHECK("Fader on turn",  npMxAutoTurn),
+  ITEM_CHECK("Fader if quiet", npMxAutoQuiet),
+  { "Fader Hold", C_INT, &npMxAutoHold, 0, 300, 1, nullptr,0, nullptr,nullptr,
+    fmtNpAutoHold, nullptr },
+};
+static CfgPage PageNpMxAuto = { "Auto Mode", NP_MXAUTO_ITEMS, 3, 0, false, nullptr };
+static_assert(sizeof(NP_MXAUTO_ITEMS) / sizeof(NP_MXAUTO_ITEMS[0]) == 3, "PageNpMxAuto row count");
+static void npaEnter() { cfgOpen(&PageNpMxAuto); }
+static const App AppNpMxAuto = {
+  "Auto Mode", nullptr, npaEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
+  nullptr, nullptr
+};
+
+// The rules only exist inside Auto, so the row only exists there too.
+static bool npMxAutoShown() { return npMxMode == 3; }
+
 /* ---- mixer ------------------------------------------------------------- */
 static const CfgItem NP_MIXER_ITEMS[] = {
   ITEM_ENUM("Mode",       npMxMode, OPT_NP_MXMODE),
+  ITEM_LINKX("Auto mode", AppNpMxAuto, npMxAutoShown),
   ITEM_ACTF("Fader Col",  npcMxFadOpen,  npcMxFadFmt),
   ITEM_ACTF("Rate B Col", npcMxRbOpen,   npcMxRbFmt),
   ITEM_INT ("Zones",      npMxZones, 2, 4, 1, ""),
@@ -4897,7 +5329,8 @@ static const CfgItem NP_MIXER_ITEMS[] = {
   ITEM_BOOL("Mark Ends",  npMxEnds),
   ITEM_ACTF("Warn Col",   npcMxWarnOpen, npcMxWarnFmt),
 };
-static CfgPage PageNpMixer = { "NeoPixel Mixer", NP_MIXER_ITEMS, 14, 0, false, nullptr };
+static CfgPage PageNpMixer = { "NeoPixel Mixer", NP_MIXER_ITEMS, 15, 0, false, nullptr };
+static_assert(sizeof(NP_MIXER_ITEMS) / sizeof(NP_MIXER_ITEMS[0]) == 15, "PageNpMixer row count");
 static void npmEnter() { cfgOpen(&PageNpMixer); }
 static const App AppNpMixer = {
   "Mixer", nullptr, npmEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
@@ -4912,6 +5345,7 @@ static const CfgItem NP_SPK_ITEMS[] = {
   ITEM_ACTF("Warn Col",  npcSpWarnOpen, npcSpWarnFmt),
 };
 static CfgPage PageNpSpk = { "NeoPixel Speaker", NP_SPK_ITEMS, 4, 0, false, nullptr };
+static_assert(sizeof(NP_SPK_ITEMS) / sizeof(NP_SPK_ITEMS[0]) == 4, "PageNpSpk row count");
 static void npsEnter() { cfgOpen(&PageNpSpk); }
 static const App AppNpSpeaker = {
   "Speaker", nullptr, npsEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
@@ -4979,6 +5413,7 @@ static const CfgItem NP_ITEMS[] = {
   ITEM_LINK("Test",      AppNpTest),
 };
 static CfgPage PageNeo = { "NeoPixel", NP_ITEMS, 5, 0, false, nullptr };
+static_assert(sizeof(NP_ITEMS) / sizeof(NP_ITEMS[0]) == 5, "PageNeo row count");
 static void npnEnter() { cfgOpen(&PageNeo); }
 static const App AppNeoPixel = {
   "NeoPixel", nullptr, npnEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
@@ -5023,6 +5458,7 @@ static const CfgItem SYS_ITEMS[] = {
   ITEM_ACT ("Factory Reset", sysReset),
 };
 static CfgPage PageSystem = { "System Settings", SYS_ITEMS, 12, 0, false, nullptr };
+static_assert(sizeof(SYS_ITEMS) / sizeof(SYS_ITEMS[0]) == 12, "PageSystem row count");
 static void ssEnter() { cfgOpen(&PageSystem); }
 
 static const App AppSystemSettings = {
@@ -5170,16 +5606,21 @@ static void slpDraw() {
     display.setTextColor(SH110X_WHITE);
   }
 
+  /* Sleep follows the configured mode, and Off is always deep, so the wake
+   * hint depends on both. It used to assume Sleep meant light and told the
+   * user any button would wake it even when the default was deep. */
+  bool deep = (slpSel == 1) || (batSleepMode != 0);
   display.setCursor(0, 54);
-  display.print(slpSel == 0 ? "wake on any button"
-                            : "wake on knob press");
-  drawButtonLabels(G_NONE, G_SELECT, G_LEFT);
+  display.print(deep ? "wake on knob press" : "wake on any button");
+  drawButtonLabels(G_RIGHT, G_SELECT, G_BACK);
 }
 
 static void slpKnob(int st) { if (st) slpSel = constrain(slpSel + (st > 0 ? 1 : -1), 0, 1); }
 
 static void slpButton(BtnId b, BtnEv e) {
   if (e != EV_PRESS) return;
+  // With only two choices the top button is a toggle rather than a cursor.
+  if (b == B_C) { slpSel ^= 1; return; }
   if (b == B_A) { navBack(); return; }             // bottom button is back
   if (btnSelect(b)) {
     // Shut Down always uses deep sleep, whatever the default mode is: it is
@@ -5271,6 +5712,7 @@ static const CfgItem BATT_ITEMS[] = {
   ITEM_INT ("Update Ivl", batUpdSec,   1,  60, 1, "s"),
 };
 static CfgPage PageBatt = { "Battery+Sleep", BATT_ITEMS, 13, 0, false, nullptr };
+static_assert(sizeof(BATT_ITEMS) / sizeof(BATT_ITEMS[0]) == 13, "PageBatt row count");
 static void batEnter() { cfgOpen(&PageBatt); }
 static const App AppBattery = {
   "Battery+Sleep", nullptr, batEnter, nullptr, nullptr, cfgDraw, cfgButton,
@@ -5338,6 +5780,7 @@ static const CfgItem SETTINGS_ITEMS[] = {
   ITEM_LINK("About",           AppAbout),
 };
 static CfgPage PageSettings = { "Settings", SETTINGS_ITEMS, 8, 0, false, nullptr };
+static_assert(sizeof(SETTINGS_ITEMS) / sizeof(SETTINGS_ITEMS[0]) == 8, "PageSettings row count");
 static void setEnter() { cfgOpen(&PageSettings); }
 
 static const App AppSettings = {
@@ -5403,12 +5846,33 @@ static void mxOnFader(float f) {
   mxLastSent = f;
 }
 
+/* Below this the channel is doing nothing worth metering. A real console
+ * meter reads exactly zero on a silent input, so the threshold only has to
+ * clear the noise floor rather than be tuned. */
+static const float NP_AUTO_QUIET = 0.02f;
+
+/* Which display the ring should be showing this frame.
+ *
+ * Fader and meter answer different questions -- "where have I set this" and
+ * "is anything coming through" -- and which one matters changes moment to
+ * moment. Auto picks per frame instead of making it a mode the user has to
+ * remember to switch. A strip with no meter at all (MAIN, DCAs) counts as
+ * quiet, since the alternative there is an unlit ring. */
+static bool mxRingWantsFader() {
+  if (npMxMode == 1) return true;
+  if (npMxMode != 3) return false;                 // 2 = meter
+  if (npMxAutoTurn && mxLastUserMove &&
+      !elapsed(mxLastUserMove, (uint32_t)npMxAutoHold * 100)) return true;
+  if (npMxAutoQuiet && (!mlMeterValid || mlMeter < NP_AUTO_QUIET)) return true;
+  return false;
+}
+
 /* Ring output for the mixer. Fader mode shows the same value as the on-screen
  * bar; meter mode mirrors the level display, zoned like a console meter. */
 static void mxRing() {
   if (!npEnable || npMxMode == 0) return;
   npFrameStart();
-  if (npMxMode == 2) {
+  if (!mxRingWantsFader()) {
     if (mlMeterValid)
       npScale(mlMeter, 0, true, false, 0,
               npMxClip != 0, npMxClip == 2);
@@ -5558,7 +6022,11 @@ static void mxDraw() {
   /* USER/IDLE removed: it only reported whether the knob had moved recently,
    * which the fader reading already shows. The link state is the part worth
    * keeping, and at y=58 its descenders were clipped by the panel edge. */
+  /* "no IP" is now distinct from "??". Roaming onto a network with no console
+   * address configured leaves the app running with nothing on the wire, and
+   * that has to read as a missing setting rather than an unreachable mixer. */
   const char *lnk = mlDemo ? "DEMO" : !wifiOnline() ? "Wi-Fi offline"
+                  : !mixerIpSet() ? "no IP"
                   : (mlLinkOk() ? "OK" : "??");
   display.setCursor(CONTENT_W - (int)strlen(lnk) * 6, 54);
   display.print(lnk);
@@ -5574,7 +6042,13 @@ static void mixerIpThenRun() { navReplace(&AppMixer); }
 // demo returns to wherever the user came from.
 static void mixerDemoStart() {
   mlDemoBegin();
-  if (cur() == &AppIpInput) navReplace(&AppMixer);
+  /* Both of these are screens the mixer diverted through rather than places
+   * the user chose to be, so the demo replaces them: backing out of it should
+   * land where the mixer was launched from, not in the setup step that was
+   * only ever a detour. */
+  gWifiGateway = gWifiOfferDemo = false;
+  gAfterConnect = nullptr;
+  if (cur() == &AppIpInput || cur() == &AppWifi) navReplace(&AppMixer);
   else navPush(&AppMixer);
 }
 
@@ -5583,13 +6057,17 @@ static void mixerLaunch() {
   if (!wifiConfigured() || !wifiOnline()) {
     gAfterConnect = &AppMixer;
     gWifiGateway = true;
+    // With no network there is no console either, so the simulator is the
+    // only thing the mixer can actually do from here. Offer it.
+    gWifiOfferDemo = true;
     navPush(&AppWifi);
     return;
   }
   if (!mixerIpSet()) {
-    ipInputBegin(&mxCfgIp, "Mixer IP", mixerIpThenRun);
+    ipInputBegin(&mxCfgIp, mxNetSsid[0] ? mxNetSsid : "Mixer IP", mixerIpThenRun);
     gIpAllowDemo = true;
     gIpDemo = mixerDemoStart;
+    gIpApply = mixerIpSync;
     navPush(&AppIpInput);
     return;
   }
@@ -5663,6 +6141,7 @@ static void registerApps() {
     &AppSpotifySetup, &AppSpotifyMenu, &AppPlayback, &AppAbout,
     &AppNeoPixel, &AppNpGlobal, &AppNpMixer, &AppNpSpeaker, &AppColourEdit,
     &AppBattery, &AppSleepMenu, &AppBattWarn, &AppChargeWait, &AppNpTest,
+    &AppMixerNets, &AppNpMxAuto,
   };
   ALL_APPS_N = sizeof(list) / sizeof(list[0]);
   for (int i = 0; i < ALL_APPS_N; i++) ALL_APPS[i] = list[i];
@@ -5736,6 +6215,7 @@ void setup() {
   analogReadResolution(12);
 
   nvLoad();
+  mxNetMigrate();      // before the first adopt can zero the legacy address
 
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!display.begin(OLED_ADDR, true)) Serial.println("SH1107 begin() FAILED");
@@ -5782,6 +6262,7 @@ void setup() {
 
 void loop() {
   knobUpdate();
+  mxNetService();
   mlTick();
   /* Skip polling entirely while the wake press is still held. Previously the
    * guard was evaluated and then ignored, so buttonsPoll() saw the button
@@ -6521,4 +7002,84 @@ void loop() {
  *         checking it afterwards would no longer ever see a reuse.
  *         The heap floors were rewritten to describe the pool they actually
  *         guard: they now apply only on a board with no PSRAM.
+ *
+ *  --- 10.x  per-network config, checkboxes -------------------------------
+ *  v10.0  The console address is now per network, which is what it always
+ *         was in reality. One global address meant carrying a venue's mixer
+ *         IP onto the home network, where it pointed at nothing but still
+ *         read as configured -- so the mixer app opened, drew a working
+ *         fader, and sent OSC into the void. That is the "it pretends like
+ *         it works" case: nothing was wrong with the app, it had simply been
+ *         told there was a console at an address where there was none.
+ *         Addresses are keyed by SSID rather than by an index into the saved
+ *         network list, which reorders itself on every connect. The live
+ *         address is adopted whenever the SSID changes, polled once a second
+ *         rather than hooked to the connect path, since a reconnect, a roam
+ *         and the first association after boot arrive by three different
+ *         routes and all three have to be caught. Once a second and not per
+ *         pass because WiFi.SSID() builds a String, and doing that a few
+ *         thousand times a second is exactly the heap churn this board
+ *         cannot afford.
+ *         With no address for the current network the link stays off the
+ *         wire entirely and the mixer gate behaves as it does when nothing
+ *         has ever been configured -- straight to the IP screen, Demo button
+ *         included. The footer says "no IP" rather than "??", since a
+ *         missing setting is not an unreachable mixer.
+ *         Settings > Mixer > Networks... lists every network the device
+ *         knows about with the address for each, assembled from three
+ *         sources -- the network we are on, the saved networks, and any
+ *         stored address belonging to neither -- so an address outlives its
+ *         network being forgotten and can still be cleared afterwards.
+ *         An address configured before this existed is migrated at boot, not
+ *         on first connect: the first adopt would find no entry, zero the
+ *         live address and flush it, destroying the only copy. Which network
+ *         it belonged to was never recorded, so the most recently saved one
+ *         is the guess. Check Settings > Mixer > Networks after upgrading.
+ *         Entering the mixer with no Wi-Fi now offers Demo Mode from the
+ *         Wi-Fi page itself. With no network there is no console either, so
+ *         the simulator is the only thing the mixer can do from there. The
+ *         row exists only in that context; PageWifi is the one page whose
+ *         length is decided at runtime.
+ *         Wi-Fi info is called "Past connections" while offline and opens
+ *         straight into the history, since the current-connection page in
+ *         that state exists only to be scrolled past.
+ *         Sleep: light sleep woke the instant it was entered if the button
+ *         that chose it was still down. Both wake sources are LEVEL
+ *         triggered, so a held button is not a press waiting to happen, it is
+ *         the wake condition already true. Deep sleep waited for the shaft
+ *         button because that is its only wake pin; light sleep arms all four
+ *         and waited for none. Now both wait, through one helper. The wake
+ *         guard could never have helped here -- the device was awake and
+ *         correctly ignoring the button, which is a different fault from
+ *         never having slept.
+ *         Sleep menu: the top button switches between Sleep and Off, since
+ *         with two choices a toggle beats a cursor, and the bottom button
+ *         shows a return arrow instead of "<" -- the same glyph this UI uses
+ *         for "move left", which read as a direction rather than an action.
+ *         The wake hint also stopped claiming any button would wake it when
+ *         the configured mode was deep.
+ *         NeoPixel mixer mode gained Auto, which picks fader or meter per
+ *         frame rather than making it a mode to remember to switch. Two
+ *         independent conditions under Auto mode: fader just after a turn,
+ *         and fader while the channel is quiet. Independent because wanting
+ *         the fader while adjusting and wanting it on a silent channel are
+ *         unrelated reasons and any combination is sensible -- which is why
+ *         they are checkboxes rather than a two-option menu that would
+ *         misrepresent them as alternatives. Fader Hold sets how long a turn
+ *         counts for, to 100ms. A strip with no meter at all (MAIN, DCAs)
+ *         counts as quiet, since the alternative there is an unlit ring.
+ *         Three additions to the config engine to support the above. C_CHECK
+ *         is a bool that toggles on select rather than opening an edit mode,
+ *         because dropping into one to change a two-state value you can
+ *         already see buys nothing. Rows gained an optional visible() hook,
+ *         so a setting that only means something in one mode is absent
+ *         rather than sitting there doing nothing -- sel now counts VISIBLE
+ *         rows and every access goes through cfgItemAt(). And an optional
+ *         dynLabel(), for a row that opens different things at different
+ *         times and should say which.
+ *         Every CfgPage now carries a static_assert tying its row-count
+ *         literal to its array. Forgetting to bump that literal silently
+ *         hides the new row, which has bitten this project repeatedly; it is
+ *         a build error now. Writing them found nothing outstanding, which
+ *         is the answer worth having.
  * ========================================================================= */
