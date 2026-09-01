@@ -1,14 +1,14 @@
-# Knob OS
+# KnobOS
+**Current version: 10.0**
 
-A mini-app operating system for a rotary knob, running on an ESP32-S2 with a
-128×64 monochrome OLED and a 12-pixel NeoPixel ring.
+A control device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
-One knob, three buttons, one screen. It controls a **Midas M32R** mixing
-console over OSC, a **Sony HT-NT5** soundbar over Sony's local HTTP API, and
-**Spotify** over the Web API — with a nav stack, a settings system, persistent
-configuration, battery monitoring and sleep.
+It has two functional miniapps: Speaker control, and Mixer control. Using the Mixer miniapp, it can control a **Midas M32R** mixing
+console over OSC. With the Speaker miniapp, it can control the volume of a Sony soundbar over Sony's local HTTP API, and
+**Spotify** over the Web API all in one app, displaying the live song progress and details too!
 
-**Current version: 10.0** · single file, `knob_os.ino`, ~6,700 lines.
+The system also includes a nav stack, a settings miniapp, persistent
+configuration via NVS, battery monitoring, and sleep.
 
 <!-- Screenshot / photo strip goes here -->
 
@@ -21,9 +21,9 @@ configuration, battery monitoring and sleep.
 
 | Part | Notes |
 |---|---|
-| **Unexpected Maker FeatherS2** | ESP32-S2, 8MB PSRAM. **PSRAM must be enabled** — Spotify does not work without it. |
+| **Unexpected Maker FeatherS2** | ESP32-S2, 8MB PSRAM. **PSRAM must be enabled** (Spotify does not work without it) |
 | **Adafruit 128×64 OLED FeatherWing** | SH1107 at I²C `0x3C`, mounted upside down (rotation 3). Carries buttons A/B/C. |
-| **EC11 / KY-040 rotary encoder** | Quadrature + shaft button. `+` to **3V3, never 5V** — the S2 is not 5V tolerant. |
+| **EC11 / KY-040 rotary encoder** | Quadrature + shaft button. |
 | **12-pixel NeoPixel ring** | Pixel 0 at 6 o'clock, advancing clockwise. V+ to **BAT, not 3V3**. |
 | **21700 Li-ion, 5000mAh** | On the FeatherS2's battery port. |
 
@@ -40,10 +40,9 @@ configuration, battery monitoring and sleep.
 | I²C SDA / SCL | 8 / 9 | UM variant pinout — **not** the Adafruit ESP32-S2 Feather's |
 | NeoPixel data | 7 | |
 | VBAT sense | 3 | ADC1_CH2, **external divider required** |
-| 5V present | 10 | 5.1k:10k divider, RTC-capable so it can wake from deep sleep |
+| 5V present (from external USB port) | 10 | 5.1k:10k divider, RTC-capable so it can wake from deep sleep |
 
-Two hardware notes worth knowing up front:
-
+Hardware notes:
 - **The plain FeatherS2 has no on-board battery divider.** The *Neo* has one on
   IO2 and the FeatherS3 on GPIO2; the original board does not. Two equal
   resistors (e.g. 2× 100k) from BAT to GPIO 3 are required. The ratio and both
@@ -51,6 +50,7 @@ Two hardware notes worth knowing up front:
 - **A 3.3V data line drives WS2812s fine at battery voltage.** Their logic-high
   threshold is 0.7 × VDD, ≈2.6V at 3.7V. At 5V it would be 3.5V, which is why
   level shifters are usually needed and aren't here.
+- Connect EC11 `+` to **3V3, never 5V** because the S2 is not 5V tolerant.
 
 ---
 
@@ -58,7 +58,7 @@ Two hardware notes worth knowing up front:
 
 Arduino IDE or `arduino-cli`, board **UM FeatherS2** (`esp32:esp32:um_feathers2`).
 
-Two board-menu settings are load-bearing:
+Two board-menu settings are important:
 
 | Setting | Value | Why |
 |---|---|---|
