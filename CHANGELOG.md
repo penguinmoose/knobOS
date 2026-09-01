@@ -1,6 +1,6 @@
 # Changelog
 
-**Current version: 10.1**
+**Current version: 10.2**
 
 Major version = a new mini-app or a new subsystem. Minor version = tweaks, bug fixes, UI work.
 
@@ -469,3 +469,15 @@ The NeoPixel speaker mode gained Progress and a second-rate colour. Its old "Vol
 Mixer auto backlighting gained Quiet Delay. Music has gaps in it — a beat between phrases, a fade, the space between tracks — and every one of those snapped the ring to the fader for a frame. A strip with no meter at all is exempt: that is not silence, it is unmeterable, and no amount of waiting will change it.
 
 The changelog moved out of the sketch into this file, so knob_os.ino is code.
+
+### v10.2
+
+The knob kept offering volume away from home, on a network with no speaker on it. v10.1 asked whether an address was *stored*, and the answer was yes — the address is global, so leaving the house carries it along, and the app was certain a speaker was present in a room that had none. The volume bar moved and changed nothing.
+
+Auto now asks whether a speaker is *reachable*. spkLinkOk() alone is far too eager to answer no, since spkOnline drops on a single refused poll and one lost packet would rebuild the whole layout, so the test is six seconds of sustained silence. The same timer covers entry, when the first poll is still in flight and the link has not yet had a chance to say anything.
+
+A speaker that is merely switched off now counts as absent. That reverses the v10.1 reasoning, which treated the mode change as the cost and missed that the alternative was a dead control: if the speaker is off the volume knob does nothing either way, so the playhead is strictly the better use of it.
+
+The bottom line distinguishes the three cases — no address, address but offline, and seeking by choice — because a missing volume bar otherwise reads as a fault rather than an answer. The artist row stops duplicating it.
+
+Still open: the speaker address itself is global, unlike the console address, so away from home the device keeps polling an IP that belongs to another network. The backoff limits that to a request every eight seconds or so, but the address wants the same per-SSID treatment the mixer got in v10.0.

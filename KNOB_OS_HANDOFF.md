@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.1** · single file, `knob_os.ino`, ~6,500 lines
+**Current version: 10.2** · single file, `knob_os.ino`, ~6,500 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -343,9 +343,14 @@ With no speaker the knob seeks rather than driving a volume bar that has
 nothing behind it, and the progress block takes the freed bottom third. Two
 rates (Knob Rate A, Knob Rate B while the shaft is held), acceleration opt-in
 per rate, local sweep with the resting position sent 400ms after the knob
-stops. `Settings → Speaker → Knob` forces `Auto | Volume | Progress`; Auto
-keys off whether a speaker address is set, not off link state, so a speaker
-that is merely switched off does not remap the control.
+stops. `Settings → Speaker → Knob` forces `Auto | Volume | Progress`.
+
+**Auto keys off reachability, not on whether an address is stored** (v10.2).
+The speaker address is global, so it travels with the device; a stored address
+is no evidence of a speaker in the room. `spkLinkOk()` alone is unusable here
+because `spkOnline` drops on a *single* refused poll, so the test is six
+seconds of sustained silence (`spaLinkOkMs` / `SPK_GONE_MS`), which doubles as
+the entry grace period while the first poll is still in flight.
 
 **The shaft button's click is decided on RELEASE while seeking**, because the
 same button selects the second rate. `spaEncTurned` records whether the hold
@@ -430,6 +435,11 @@ Spotify `...` indicator latched on permanently. Always brace.
 
 ## 7. Known-open items
 
+0. **The speaker address is still global.** The console address became
+   per-SSID in 10.0; the Sony address did not, so away from home the device
+   keeps polling an IP belonging to another network (backed off to roughly one
+   request every 8s). It wants the same per-SSID treatment — the table and the
+   Networks page already exist and would need a second column.
 0. **After upgrading to 10.0, check Settings → Mixer → Networks...** The old
    single console address is migrated onto the most recently saved network,
    which is a guess — the network it actually belonged to was never recorded.

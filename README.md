@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.1**
+**Current version: 10.2**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -158,8 +158,13 @@ In seek mode the shaft button doubles as the rate selector, so its click is
 decided on release: a hold that moved the knob was a rate, not a play/pause.
 
 Settings → Speaker → **Knob** overrides the choice (`Auto` | `Volume` |
-`Progress`). Auto means volume when a speaker address is set. A speaker that is
-merely switched off keeps the volume knob rather than silently remapping it.
+`Progress`). Auto means volume when a speaker is *reachable*, not merely when
+an address is stored: the address is global, so it comes with you when you
+leave the house, and a stored address is no evidence a speaker is in the room.
+A speaker that is switched off counts as absent too, since the volume knob
+does nothing either way and the playhead is a better use of it. The switch
+takes six seconds of silence, so one dropped packet does not rebuild the
+layout.
 
 ### Mixer Control
 

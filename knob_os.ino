@@ -15,12 +15,12 @@
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 10.1                        (changelog in CHANGELOG.md)
+ *  KNOB OS  --  version 10.2                        (changelog in CHANGELOG.md)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "10.1"
+#define KNOB_OS_VERSION "10.2"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -4766,6 +4766,7 @@ static bool     spaUserActive = false, spaPending = false;
 static uint32_t spaChangeMs = 0, spaSendMs = 0, spaUserMs = 0, spaPendMs = 0;
 static bool     spaSeeking = false, spaCPrev = false, spaAPrev = false;
 static bool     spaHoldFired = false;
+static uint32_t spaLinkOkMs = 0;  // last time the speaker was answering
 
 static uint8_t  spaSeekBtn = 0;                 // 1 = forward, 2 = back
 static uint32_t spaSeekStart = 0, spaSeekLast = 0;
@@ -4785,6 +4786,7 @@ static bool     spaEncPrev = false, spaEncTurned = false;
 
 static void spaEnter() {
   knobResetSteps();
+  spaLinkOkMs = millis();      // presume present until the first poll answers
   spkActive = true;
   syActive = true;
   spkQuiet(0);
@@ -4816,11 +4818,37 @@ static void spaExit() {
  * value; the next detent moves on from there. Nothing can disagree.        */
 static bool spaSeekArmed();
 
+/* Is there a speaker to send volume to?
+ *
+ * "Is an address stored" was the wrong question. The address is global, so
+ * carrying it away from the network it belongs to left the app certain a
+ * speaker was present in a room that had none -- offering a volume bar that
+ * moved and changed nothing. Reachability is the question that survives
+ * leaving the house.
+ *
+ * spkLinkOk() on its own is far too eager to answer no: spkOnline drops on a
+ * single refused poll, so one lost packet would rebuild the whole layout.
+ * A sustained silence is the test, and the same timer doubles as the grace
+ * period at entry, when the first poll is still in flight and the link has
+ * not yet had a chance to say anything.
+ *
+ * A speaker that is switched off counts as absent, and should: the volume
+ * knob does nothing either way, so the playhead is strictly the better use of
+ * it. That is a reversal of the v10.1 reasoning, which weighed the mode
+ * change as the cost and missed that the alternative was a dead control. */
+static const uint32_t SPK_GONE_MS = 6000;
+
+static bool spaSpkPresent() {
+  if (!spkIpSet()) return false;
+  if (spkLinkOk()) return true;
+  return !elapsed(spaLinkOkMs, SPK_GONE_MS);
+}
+
 // What the knob is driving right now.
 static bool spaKnobProgress() {
   if (spCfgKnobMode == 1) return false;          // Volume, always
   if (spCfgKnobMode == 2) return true;           // Progress, always
-  return !spkIpSet();                            // Auto
+  return !spaSpkPresent();                       // Auto
 }
 
 // ...and whether there is anything for it to drive.
@@ -4952,6 +4980,7 @@ static void spaTick() {
 
   spkService();
   syService();
+  if (spkLinkOk()) spaLinkOkMs = millis();
 
   if (spaPending) {
     if (spkVol == spaSent) spaPending = false;
@@ -5170,7 +5199,7 @@ static void spaDraw() {
   const char *a2 = syArtist[0] ? syArtist
                  : dbg[0] ? dbg
                  : !wifiOnline() ? "Wi-Fi offline"
-                 : (spkIpSet() && !spkLinkOk()) ? "speaker no response"
+                 : (spkIpSet() && !spkLinkOk() && showVol) ? "speaker no response"
                  : spkMute ? "MUTED" : "";
   drawRowText(12, a2);
 
@@ -5210,6 +5239,7 @@ static void spaDraw() {
      * playhead alone. */
     const char *msg = spaScrub ? (spaScrubB ? "Rate B" : "Rate A")
                     : !spkIpSet() ? "No speaker - Spotify only"
+                    : !spaSpkPresent() ? "Speaker offline - knob seeks"
                     : spaScrubArmed() ? "Knob seeks"
                     : "";
     if (msg[0]) drawRowText(54, msg);
