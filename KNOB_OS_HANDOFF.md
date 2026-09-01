@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.0** · single file, `knob_os.ino`, ~6,700 lines
+**Current version: 10.1** · single file, `knob_os.ino`, ~6,500 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -339,6 +339,19 @@ progress clock that freezes instantly on pause rather than waiting for the
 cloud. **Runs without a speaker** as a pure Spotify remote, and without Spotify
 as a pure volume knob.
 
+With no speaker the knob seeks rather than driving a volume bar that has
+nothing behind it, and the progress block takes the freed bottom third. Two
+rates (Knob Rate A, Knob Rate B while the shaft is held), acceleration opt-in
+per rate, local sweep with the resting position sent 400ms after the knob
+stops. `Settings → Speaker → Knob` forces `Auto | Volume | Progress`; Auto
+keys off whether a speaker address is set, not off link state, so a speaker
+that is merely switched off does not remap the control.
+
+**The shaft button's click is decided on RELEASE while seeking**, because the
+same button selects the second rate. `spaEncTurned` records whether the hold
+moved the knob; if it did, it was a rate and no click fires. `spaButton()`
+returns early for `B_ENC` in that mode and `spaTick()` owns it instead.
+
 **NeoPixel ring** — gauge with smoothing (the pixel straddling the level lights
 proportionally, so 12 pixels read as continuous), console-style zoned meter
 (colour by *pixel position*, not by level), clip LED that can bypass both
@@ -454,10 +467,9 @@ Spotify `...` indicator latched on permanently. Always brace.
 | 7.x | **Rotary encoder replaces servo** — large deletion of sync code |
 | 8.x | NeoPixel ring, battery and sleep, PSRAM |
 | 9.x | Power polish, task split, network debugging, mbedTLS heap fix |
-| 10.x | Per-network console address, checkbox rows, conditional rows |
+| 10.x | Per-network console address, checkbox rows, conditional rows, knob seeking |
 
-Full per-version changelog is in the comment block at the bottom of
-`knob_os.ino`.
+Full per-version changelog is in `CHANGELOG.md`.
 
 ---
 
@@ -466,6 +478,7 @@ Full per-version changelog is in the comment block at the bottom of
 | File | Purpose |
 |---|---|
 | `knob_os.ino` | The firmware. Everything. |
+| `CHANGELOG.md` | Full per-version history (moved out of the sketch at v10.1) |
 | `SPOTIFY_SETUP.md` | OAuth walkthrough |
 | `tools/gen_icon.py` | Regenerates the 27×27 Spotify bitmap |
 | `sony_api_probe.ino` | Standalone Sony API prober (superseded, useful reference) |

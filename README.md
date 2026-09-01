@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.0**
+**Current version: 10.1**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -132,15 +132,34 @@ immediately, so navigation stays snappy.
 
 | Input | Does |
 |---|---|
-| Turn | Volume (local Sony API — instant) |
+| Turn | Volume, or the playhead when there is no speaker (see below) |
 | Top button (C) | Next track |
 | Bottom button (A) | Previous track |
-| **Hold** C or A | Cue and review — scrub forward/back, with configurable hold time, speed, granularity and acceleration |
-| Middle button (B) | Play/pause, or mute — `Centre Btn` picks, `Auto` means play/pause when Spotify is authorised |
+| **Hold** C or A | Cue and review: scrub forward/back, with configurable hold time, speed, granularity and acceleration |
+| Middle button (B) | Play/pause, or mute (`Centre Btn` picks; `Auto` means play/pause when Spotify is authorised) |
 
 The screen shows title, artist, a progress bar and both clocks. The progress
 clock runs locally between polls, so it moves smoothly at 20fps and freezes the
 instant you pause rather than waiting for the cloud to confirm.
+
+**With no speaker, the knob seeks instead.** A volume bar with nothing behind
+it is a control that does nothing, so it goes, and the progress block takes the
+bottom third of the screen at twice the bar height. One detent moves the
+playhead by Knob Rate A, or Knob Rate B while the shaft button is held (the
+same two-rate arrangement as the mixer fader, and B may be the larger of the
+two). Acceleration is opt-in per rate, so spinning fast covers more ground.
+
+The sweep is local and only the resting position is sent, 400 ms after the knob
+stops. A Spotify seek is a round trip of a few hundred milliseconds, so one per
+detent would flood the API and lag behind the knob. Seeking does not interrupt
+playback, so the track keeps running while you scrub.
+
+In seek mode the shaft button doubles as the rate selector, so its click is
+decided on release: a hold that moved the knob was a rate, not a play/pause.
+
+Settings → Speaker → **Knob** overrides the choice (`Auto` | `Volume` |
+`Progress`). Auto means volume when a speaker address is set. A speaker that is
+merely switched off keeps the volume knob rather than silently remapping it.
 
 ### Mixer Control
 
@@ -278,10 +297,17 @@ indicator.
   you have to remember to switch. Two independent conditions under
   Settings → NeoPixel → Mixer → Auto mode: show the fader just after a turn
   (for a configurable Fader Hold), and show the fader while the channel is
-  quiet. Independent rather than a choice, because wanting the fader while
-  adjusting and wanting it on a silent channel are unrelated reasons and any
-  combination is sensible. A strip with no meter at all (MAIN, DCAs) counts as
-  quiet, since the alternative there is an unlit ring.
+  quiet (after a configurable Quiet Delay). Independent rather than a choice,
+  because wanting the fader while adjusting and wanting it on a silent channel
+  are unrelated reasons and any combination is sensible.
+  Quiet Delay exists because music has gaps in it: a beat between phrases, a
+  fade, the space between tracks. Without it every one of those snapped the
+  ring to the fader for a frame. A strip with no meter at all (MAIN, DCAs) is
+  exempt from the delay, since that is not silence but the absence of a meter,
+  and waiting will not change it.
+- The **speaker ring** follows the knob: volume when the knob is on volume,
+  playhead when it is on the playhead, with a separate colour while the second
+  seek rate is held. `Progress` and `Volume` force one or the other.
 - RGB/HSV colour editor with live preview; origin and reverse settings so the
   ring can be mounted any way round without rewiring.
 
@@ -420,15 +446,15 @@ If Speaker info says `tlspool internal`, PSRAM is off in the board menu.
 
 | File | Purpose |
 |---|---|
-| `knob_os.ino` | The firmware. Everything. Full per-version changelog in the comment block at the bottom. |
+| `knob_os.ino` | The firmware. Everything. |
+| `CHANGELOG.md` | Full per-version history |
 | `KNOB_OS_HANDOFF.md` | Engineering handoff: architecture, hardware detail, and a debugging-history section of lessons worth keeping |
 | `SPOTIFY_SETUP.md` | OAuth walkthrough |
 | `README.md` | This file |
 
-The changelog at the end of `knob_os.ino` is written as reasoning, not as a
-list of edits — it records *why* each change was made and what the wrong
-hypothesis was. It is the best guide to the parts of this codebase that look
-arbitrary.
+`CHANGELOG.md` is written as reasoning, not as a list of edits: it records why
+each change was made and what the wrong hypothesis was. It is the best guide to
+the parts of this codebase that look arbitrary.
 
 ---
 
