@@ -15,12 +15,12 @@
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 10.3                        (changelog in CHANGELOG.md)
+ *  KNOB OS  --  version 10.4                        (changelog in CHANGELOG.md)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "10.3"
+#define KNOB_OS_VERSION "10.4"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -101,6 +101,11 @@ struct CfgPage {
 };
 
 struct NvKey { const char *k; int32_t *v; int32_t def; };
+
+// The addresses a single Wi-Fi network carries. Declared up here with the
+// other types because the .ino preprocessor puts function prototypes above
+// everything, and one of them takes this by reference.
+struct NetIps { int32_t mixer; int32_t spk; };
 
 struct TextReq {
   const char *title;
@@ -351,10 +356,23 @@ static int32_t spCfgVolMax    = 50;    // is a soft range, not a hard stop
 // transport verbs do nothing. Mute is local and works, hence the default.
 static int32_t spCfgCenterBtn = 0;     // 0 = Auto, 1 = Mute, 2 = Play/Pause
 static int32_t spCfgEncBtn    = 0;     // 0 Play/Pause, 1 Mute (hold), 2 Next, 3 Off
-/* What the knob does in Speaker Control. Auto gives it the volume when there
- * is a speaker to send it to and the playhead when there is not, since a
- * volume bar with nothing behind it is a control that does nothing. */
-static int32_t spCfgKnobMode  = 0;     // 0 Auto, 1 Volume, 2 Progress
+/* Which half of Speaker Control leads.
+ *
+ * All three end up in the same place once the facts are in; they differ only
+ * in what is presumed while the first poll is still in flight, which is the
+ * couple of seconds the user actually sees. Speaker default presumes a
+ * speaker is there and falls back; Spotify default presumes not and switches
+ * up when one answers; Spotify only never asks.
+ *
+ * With addresses now per network, most of the delay this used to cover is
+ * gone anyway: on a network with no speaker address there is nothing to
+ * presume about, and the app is in Spotify mode from the first frame. */
+static int32_t spCfgMode      = 0;     // 0 speaker first, 1 spotify first, 2 spotify only
+/* The row under the title is contested: the album wants it, and a long title
+ * wants it as a second line. Automatic gives it to whichever needs it. */
+static int32_t spCfgTitle     = 2;     // 0 album, 1 wrap, 2 automatic
+static int32_t spCfgTitleOver = 1;     // title too long for two lines:
+                                       //   0 one marquee row + album, 1 two rows
 static int32_t spCfgScrubA    = 5000;  // ms of track per detent
 static int32_t spCfgScrubB    = 30000; // ...while the shaft button is held
 static int32_t spCfgScrubAcc  = 1;     // 0 off, 1 rate A, 2 rate B, 3 both
@@ -420,7 +438,8 @@ static const NvKey NVKEYS[] = {
   { "kHold", &spCfgSeekHold,450 }, { "kRate", &spCfgSeekRate, 15 },
   { "kStep", &spCfgSeekStep,100 }, { "kAccel",&spCfgSeekAccel,60 },
   { "kTimeR",&spCfgTimeRight, 0 },
-  { "pKnob", &spCfgKnobMode, 0 }, { "kScrA", &spCfgScrubA, 5000 },
+  { "pMode", &spCfgMode, 0 },     { "kScrA", &spCfgScrubA, 5000 },
+  { "pTitle",&spCfgTitle, 2 },    { "pTitleOv", &spCfgTitleOver, 1 },
   { "kScrB", &spCfgScrubB, 30000 }, { "kScrAcc", &spCfgScrubAcc, 1 },
   { "nav0", &navSaved0, -1 }, { "nav1", &navSaved1, -1 },
   { "nav2", &navSaved2, -1 }, { "nav3", &navSaved3, -1 },
@@ -548,79 +567,106 @@ static void nvNetGet(int i, char *ssid, size_t sn, char *pass, size_t pn) {
   prefs.end();
 }
 
-/* ---- mixer IP per network ------------------------------------------------
+/* ---- device addresses per network ----------------------------------------
  *
- * A console lives on one network. Storing a single mixer IP meant carrying a
- * venue's address onto the home network, where it points at nothing but still
- * reads as configured -- so the mixer app opened, drew a fader, and quietly
- * sent OSC into the void. Keying the address by SSID makes "no mixer here"
- * a state the device can actually be in.
+ * A console lives on one network, and so does a soundbar. Storing one address
+ * each meant carrying a venue's mixer IP onto the home network, and the home
+ * soundbar's IP everywhere else, where they point at nothing but still read
+ * as configured. The mixer app opened, drew a fader and sent OSC into the
+ * void; the speaker app offered a volume bar for several seconds before the
+ * silence was long enough to prove there was nothing there. Keying both by
+ * SSID makes "no mixer here" and "no speaker here" states the device can
+ * simply be in, and know instantly.
  *
  * Keyed by SSID rather than by an index into the saved-network list, because
- * that list reorders itself on every connect. */
-static int nvMixNetCount() {
+ * that list reorders itself on every connect.
+ *
+ * mnVer records which fields have been populated from the older single-value
+ * settings: 1 = mixer (v10.0), 2 = speaker (v10.4). */
+static int nvNetIpsCount() {
   prefs.begin("knobos", true);
   int n = prefs.getInt("mnN", 0);
   prefs.end();
   return constrain(n, 0, MAX_SAVED_NETS);
 }
 
-static void nvMixNetGet(int i, char *ssid, size_t sn, int32_t *ip) {
-  char ks[8], ki[8];
+static void nvNetIpsGet(int i, char *ssid, size_t sn, NetIps *out) {
+  char ks[8], ki[8], kp[8];
   snprintf(ks, sizeof(ks), "mns%d", i);
   snprintf(ki, sizeof(ki), "mni%d", i);
+  snprintf(kp, sizeof(kp), "mnp%d", i);
   prefs.begin("knobos", true);
   if (ssid) prefs.getString(ks, ssid, sn);
-  if (ip) *ip = prefs.getInt(ki, 0);
+  if (out) {
+    out->mixer = prefs.getInt(ki, 0);
+    out->spk   = prefs.getInt(kp, 0);
+  }
   prefs.end();
 }
 
-static int32_t nvMixNetFind(const char *ssid) {
-  if (!ssid || !ssid[0]) return 0;
-  int n = nvMixNetCount();
+static bool nvNetIpsFind(const char *ssid, NetIps *out) {
+  if (out) { out->mixer = 0; out->spk = 0; }
+  if (!ssid || !ssid[0]) return false;
+  int n = nvNetIpsCount();
   for (int i = 0; i < n; i++) {
     char es[33];
-    int32_t ip = 0;
+    NetIps v = { 0, 0 };
     es[0] = 0;
-    nvMixNetGet(i, es, sizeof(es), &ip);
-    if (es[0] && !strcmp(es, ssid)) return ip;
+    nvNetIpsGet(i, es, sizeof(es), &v);
+    if (es[0] && !strcmp(es, ssid)) { if (out) *out = v; return true; }
   }
-  return 0;
+  return false;
 }
 
-/* An address of 0 means "no mixer on this network", which is a real answer
- * and worth storing -- otherwise clearing one would silently fall back to
- * whatever the previous single global value happened to be. */
-static void nvMixNetSet(const char *ssid, int32_t ip) {
+/* An address of 0 means "no such device on this network", which is a real
+ * answer and worth storing -- otherwise clearing one would silently fall back
+ * to whatever the previous single global value happened to be. */
+static void nvNetIpsSet(const char *ssid, const NetIps &val) {
   if (!ssid || !ssid[0]) return;
   char s[MAX_SAVED_NETS][33];
-  int32_t v[MAX_SAVED_NETS];
-  int n = nvMixNetCount(), out = 0;
+  NetIps v[MAX_SAVED_NETS];
+  int n = nvNetIpsCount(), out = 0;
 
   strncpy(s[0], ssid, 32); s[0][32] = 0;
-  v[0] = ip;
+  v[0] = val;
   out = 1;
   for (int i = 0; i < n && out < MAX_SAVED_NETS; i++) {
     char es[33];
-    int32_t eip = 0;
+    NetIps ev = { 0, 0 };
     es[0] = 0;
-    nvMixNetGet(i, es, sizeof(es), &eip);
+    nvNetIpsGet(i, es, sizeof(es), &ev);
     if (!es[0] || !strcmp(es, ssid)) continue;      // dedupe
     strncpy(s[out], es, 32); s[out][32] = 0;
-    v[out] = eip;
+    v[out] = ev;
     out++;
   }
 
   prefs.begin("knobos", false);
   prefs.putInt("mnN", out);
   for (int i = 0; i < out; i++) {
-    char ks[8], ki[8];
+    char ks[8], ki[8], kp[8];
     snprintf(ks, sizeof(ks), "mns%d", i);
     snprintf(ki, sizeof(ki), "mni%d", i);
+    snprintf(kp, sizeof(kp), "mnp%d", i);
     prefs.putString(ks, s[i]);
-    prefs.putInt(ki, v[i]);
+    prefs.putInt(ki, v[i].mixer);
+    prefs.putInt(kp, v[i].spk);
   }
   prefs.end();
+}
+
+// Read-modify-write, so setting one address never blanks the other.
+static void nvNetSetMixer(const char *ssid, int32_t ip) {
+  NetIps v = { 0, 0 };
+  nvNetIpsFind(ssid, &v);
+  v.mixer = ip;
+  nvNetIpsSet(ssid, v);
+}
+static void nvNetSetSpk(const char *ssid, int32_t ip) {
+  NetIps v = { 0, 0 };
+  nvNetIpsFind(ssid, &v);
+  v.spk = ip;
+  nvNetIpsSet(ssid, v);
 }
 
 static void nvNetRemember(const char *ssid, const char *pass) {
@@ -2726,37 +2772,76 @@ static int16_t oscI16LE(const uint8_t *b, int o) {
 static IPAddress mixerIp() { return IPAddress((uint32_t)mxCfgIp); }
 static bool mixerIpSet() { return mxCfgIp != 0; }
 
-/* mxCfgIp is the address for the network we are on right now, adopted from
- * the per-SSID table whenever that network changes. It stays an NVS value of
- * its own so the last one survives a reboot into a Wi-Fi outage rather than
- * blanking the mixer for want of an SSID to look up. */
-static char mxNetSsid[33] = "";
+/* mxCfgIp and spCfgIp are the addresses for the network we are on right now,
+ * adopted from the per-SSID table whenever that network changes. Both stay
+ * NVS values of their own so the last pair survives a reboot into a Wi-Fi
+ * outage rather than blanking for want of an SSID to look up. */
+static char gNetSsid[33] = "";
 
-/* Carry an address configured before this table existed into the table, once,
+/* Carry addresses configured before this table existed into the table, once,
  * at boot.
  *
  * It has to happen here rather than on the first connect. The first adopt
  * would otherwise find no entry for that network, set the live address to
  * zero and flush it -- destroying the only copy of an address the user had
- * working. Which network it belonged to is not recorded anywhere, so the most
- * recently saved one is the best available guess; the Networks page shows
- * where it landed and moving it is one edit. A wrong guess is recoverable,
- * a deleted address is not. */
-static void mxNetMigrate() {
-  if (!mxCfgIp || nvMixNetCount() || !nvNetCount()) return;
-  char s[33];
-  s[0] = 0;
-  nvNetGet(0, s, sizeof(s), nullptr, 0);
-  if (s[0]) nvMixNetSet(s, mxCfgIp);
+ * working.
+ *
+ * Neither address recorded which network it belonged to, so each gets the
+ * best guess available and the Networks page shows where it landed. For the
+ * console that is the most recently saved network; for the soundbar it is the
+ * network the device is configured to join, since a soundbar lives where the
+ * device lives. A wrong guess is one edit to fix. A deleted address is not.
+ *
+ * mnVer tracks which of the two has been done, because the table is no longer
+ * empty by the time the second one is added. */
+static void netProfileMigrate() {
+  prefs.begin("knobos", true);
+  int ver = prefs.getInt("mnVer", 0);
+  prefs.end();
+  if (ver >= 2) return;
+
+  if (ver < 1 && mxCfgIp && nvNetCount() && !nvNetIpsCount()) {
+    char s[33];
+    s[0] = 0;
+    nvNetGet(0, s, sizeof(s), nullptr, 0);
+    if (s[0]) nvNetSetMixer(s, mxCfgIp);
+  }
+  if (spCfgIp) {
+    char s[33];
+    s[0] = 0;
+    snprintf(s, sizeof(s), "%s", wifiSsid);
+    if (!s[0] && nvNetCount()) nvNetGet(0, s, sizeof(s), nullptr, 0);
+    if (s[0]) nvNetSetSpk(s, spCfgIp);
+  }
+
+  prefs.begin("knobos", false);
+  prefs.putInt("mnVer", 2);
+  prefs.end();
 }
 
-static void mxNetAdopt(const char *ssid) {
-  snprintf(mxNetSsid, sizeof(mxNetSsid), "%s", ssid ? ssid : "");
-  int32_t ip = nvMixNetFind(mxNetSsid);
-  if (ip == mxCfgIp) return;
-  mxCfgIp = ip;
-  mlUdpUp = false;          // any socket open for the old address is stale
-  nvTouch();
+// Defined with the speaker module, which owns the state it resets.
+static void spkNoteAddressChange();
+
+/* Adopting a network replaces BOTH live addresses, including with zero. Zero
+ * is the whole point: it is what lets the speaker app know at once that there
+ * is nothing to talk to here, rather than spending six seconds of silence
+ * finding out. */
+static void netProfileAdopt(const char *ssid) {
+  snprintf(gNetSsid, sizeof(gNetSsid), "%s", ssid ? ssid : "");
+  NetIps v = { 0, 0 };
+  nvNetIpsFind(gNetSsid, &v);
+  bool changed = false;
+  if (v.mixer != mxCfgIp) {
+    mxCfgIp = v.mixer;
+    mlUdpUp = false;        // any socket open for the old address is stale
+    changed = true;
+  }
+  if (v.spk != spCfgIp) {
+    spCfgIp = v.spk;
+    spkNoteAddressChange();
+    changed = true;
+  }
+  if (changed) nvTouch();
 }
 
 /* Polled rather than hooked to the connect path: a reconnect, a roam onto a
@@ -2766,13 +2851,13 @@ static void mxNetAdopt(const char *ssid) {
  * Once a second, not every pass: WiFi.SSID() builds a String, and doing that
  * a few thousand times a second is exactly the kind of heap churn this board
  * cannot afford. */
-static uint32_t mxNetMs = 0;
+static uint32_t gNetMs = 0;
 
-static void mxNetService() {
-  if (!wifiOnline() || !elapsed(mxNetMs, 1000)) return;
-  mxNetMs = millis();
+static void netProfileService() {
+  if (!wifiOnline() || !elapsed(gNetMs, 1000)) return;
+  gNetMs = millis();
   String cur = WiFi.SSID();
-  if (cur.length() && strcmp(cur.c_str(), mxNetSsid)) mxNetAdopt(cur.c_str());
+  if (cur.length() && strcmp(cur.c_str(), gNetSsid)) netProfileAdopt(cur.c_str());
 }
 
 static void udpTx(int len) {
@@ -3074,20 +3159,21 @@ static const App AppEncoderMenu = {
 };
 
 /* ###########################################################################
- * #                  MIXER ADDRESS PER NETWORK                              #
+ * #                  DEVICE ADDRESSES PER NETWORK                           #
  * #                                                                         #
- * #  One row per network the device knows about, each holding the console   #
- * #  address to use while connected to it. The list is assembled from three  #
- * #  sources -- the network we are on, the saved networks, and any stored    #
- * #  entry belonging to neither -- so an address survives its network being  #
- * #  forgotten and can still be cleared afterwards.                          #
+ * #  One row per network the device knows about, each holding the console    #
+ * #  and soundbar addresses to use while connected to it. The list is        #
+ * #  assembled from three sources -- the network we are on, the saved        #
+ * #  networks, and any stored entry belonging to neither -- so an address    #
+ * #  survives its network being forgotten and can still be cleared           #
+ * #  afterwards.                                                             #
  * ######################################################################### */
 
 /* Saved networks and stored addresses can name disjoint sets -- an address
  * outlives the network being forgotten -- so the list has to hold both. */
 static const int MN_MAX = MAX_SAVED_NETS * 2 + 1;
 static char    mnSsid[MN_MAX][33];
-static int32_t mnIp[MN_MAX];
+static NetIps  mnIps[MN_MAX];
 static int     mnN = 0, mnSel = 0, mnEdit = -1;
 static int32_t mnScratch = 0;
 
@@ -3095,7 +3181,7 @@ static void mnAdd(const char *ssid) {
   if (!ssid || !ssid[0] || mnN >= MN_MAX) return;
   for (int i = 0; i < mnN; i++) if (!strcmp(mnSsid[i], ssid)) return;
   snprintf(mnSsid[mnN], sizeof(mnSsid[0]), "%s", ssid);
-  mnIp[mnN] = nvMixNetFind(ssid);
+  nvNetIpsFind(ssid, &mnIps[mnN]);
   mnN++;
 }
 
@@ -3109,46 +3195,91 @@ static void mnBuild() {
     nvNetGet(i, es, sizeof(es), nullptr, 0);
     mnAdd(es);
   }
-  int nm = nvMixNetCount();
+  int nm = nvNetIpsCount();
   for (int i = 0; i < nm; i++) {
     char es[33];
     es[0] = 0;
-    nvMixNetGet(i, es, sizeof(es), nullptr);
+    nvNetIpsGet(i, es, sizeof(es), nullptr);
     mnAdd(es);
   }
 }
 
-static void mnEnter() { knobInputMode(); mnBuild(); mnSel = constrain(mnSel, 0, max(0, mnN - 1)); }
+/* ---- detail: the two addresses for one network -------------------------- */
+static const char *mnDetailTitle() {
+  return (mnEdit >= 0 && mnEdit < mnN) ? mnSsid[mnEdit] : "Network";
+}
+
+static void mnFmtIp(char *b, size_t n, int32_t ip) {
+  if (ip) snprintf(b, n, "%s", IPAddress((uint32_t)ip).toString().c_str());
+  else    snprintf(b, n, "none");
+}
+static void mnFmtMixer(char *b, size_t n) {
+  mnFmtIp(b, n, (mnEdit >= 0) ? mnIps[mnEdit].mixer : 0);
+}
+static void mnFmtSpk(char *b, size_t n) {
+  mnFmtIp(b, n, (mnEdit >= 0) ? mnIps[mnEdit].spk : 0);
+}
 
 /* Written on both Commit and Clear, via gIpApply. If the row happens to be
  * the network we are on, the live address follows immediately -- otherwise
  * the change would not take effect until the next reconnect. */
+static bool mnEditingSpk = false;
+
 static void mnApply() {
   if (mnEdit < 0 || mnEdit >= mnN) return;
-  mnIp[mnEdit] = mnScratch;
-  nvMixNetSet(mnSsid[mnEdit], mnScratch);
-  if (!strcmp(mnSsid[mnEdit], mxNetSsid)) {
-    mxCfgIp = mnScratch;
-    mlUdpUp = false;
-    nvTouch();
+  bool here = !strcmp(mnSsid[mnEdit], gNetSsid);
+  if (mnEditingSpk) {
+    mnIps[mnEdit].spk = mnScratch;
+    nvNetSetSpk(mnSsid[mnEdit], mnScratch);
+    if (here) { spCfgIp = mnScratch; spkNoteAddressChange(); nvTouch(); }
+  } else {
+    mnIps[mnEdit].mixer = mnScratch;
+    nvNetSetMixer(mnSsid[mnEdit], mnScratch);
+    if (here) { mxCfgIp = mnScratch; mlUdpUp = false; nvTouch(); }
   }
 }
 
-static void mnDone() { navBack(); }
-
-static void mnOpen() {
-  if (mnSel < 0 || mnSel >= mnN) return;
-  mnEdit = mnSel;
-  mnScratch = mnIp[mnSel];
-  ipInputBegin(&mnScratch, mnSsid[mnSel], mnDone);
+static void mnOpenIp(bool spk) {
+  if (mnEdit < 0 || mnEdit >= mnN) return;
+  mnEditingSpk = spk;
+  mnScratch = spk ? mnIps[mnEdit].spk : mnIps[mnEdit].mixer;
+  ipInputBegin(&mnScratch, mnSsid[mnEdit], nullptr);
   gIpAllowDemo = false;
   gIpDemo = nullptr;
   gIpApply = mnApply;
   navPush(&AppIpInput);
 }
+static void mnOpenMixer() { mnOpenIp(false); }
+static void mnOpenSpk()   { mnOpenIp(true); }
+
+static const CfgItem NET_DETAIL_ITEMS[] = {
+  { "Mixer IP",   C_ACT, nullptr,0,0,0, nullptr,0, nullptr, mnOpenMixer, mnFmtMixer, nullptr },
+  { "Speaker IP", C_ACT, nullptr,0,0,0, nullptr,0, nullptr, mnOpenSpk,   mnFmtSpk,   nullptr },
+};
+static CfgPage PageNetDetail = { "Network", NET_DETAIL_ITEMS, 2, 0, false, mnDetailTitle };
+static_assert(sizeof(NET_DETAIL_ITEMS) / sizeof(NET_DETAIL_ITEMS[0]) == 2, "PageNetDetail row count");
+static void mndEnter() { cfgOpen(&PageNetDetail); }
+
+static const App AppNetDetail = {
+  "Network", nullptr, mndEnter, nullptr, nullptr, cfgDraw, cfgButton, cfgKnob,
+  nullptr, nullptr
+};
+
+/* ---- list --------------------------------------------------------------- */
+static void mnEnter() {
+  knobInputMode();
+  mnBuild();
+  mnSel = constrain(mnSel, 0, max(0, mnN - 1));
+}
+
+static void mnOpen() {
+  if (mnSel < 0 || mnSel >= mnN) return;
+  mnEdit = mnSel;
+  navPush(&AppNetDetail);
+}
 
 static void mnDraw() {
-  drawTitle("Mixer Networks");
+  drawTitle("Networks");
   if (mnN == 0) {
     display.setCursor(0, 26);
     display.print("No networks known");
@@ -3161,10 +3292,13 @@ static void mnDraw() {
   if (first > mnN - ROWS_VIS) first = max(0, mnN - ROWS_VIS);
   for (int i = 0; i < ROWS_VIS && first + i < mnN; i++) {
     int idx = first + i;
-    char v[18];
-    if (mnIp[idx]) snprintf(v, sizeof(v), "%s", IPAddress((uint32_t)mnIp[idx]).toString().c_str());
-    else           snprintf(v, sizeof(v), "none");
-    drawRow(ROW_TOP + i * ROW_H, idx == mnSel, false, mnSsid[idx], v, G_NONE);
+    /* Which of the two are set, not the addresses themselves: two dotted
+     * quads do not fit beside an SSID, and knowing whether a network has a
+     * console or a speaker on it is the question this list answers. */
+    const char *tag = mnIps[idx].mixer && mnIps[idx].spk ? "M+S"
+                    : mnIps[idx].mixer ? "M"
+                    : mnIps[idx].spk   ? "S" : "-";
+    drawRow(ROW_TOP + i * ROW_H, idx == mnSel, false, mnSsid[idx], tag, G_RIGHT);
   }
   drawScrollbar(mnN, first);
   drawButtonLabels(G_UP, G_SELECT, G_DOWN);
@@ -3180,7 +3314,7 @@ static void mnButton(BtnId b, BtnEv e) {
 
 static void mnKnob(int st) { if (st) mnMove(st > 0 ? +1 : -1); }
 
-static const App AppMixerNets = {
+static const App AppNetworks = {
   "Networks", nullptr, mnEnter, nullptr, nullptr, mnDraw, mnButton, mnKnob,
   nullptr, nullptr
 };
@@ -3199,18 +3333,18 @@ static void fmtMixerIp(char *b, size_t n) {
 }
 
 /* Names the network the address applies to, since it is no longer global. */
-static const char *mixerIpLabel() { return mxNetSsid[0] ? "IP (this net)" : "IP"; }
+static const char *mixerIpLabel() { return gNetSsid[0] ? "IP (this net)" : "IP"; }
 
 /* The IP row edits the address for the network we are on, so every write has
  * to land in the per-SSID table as well. Without this the row would appear to
  * work and then be overwritten by the table on the next connect. */
 static void mixerIpSync() {
-  if (mxNetSsid[0]) nvMixNetSet(mxNetSsid, mxCfgIp);
+  if (gNetSsid[0]) nvNetSetMixer(gNetSsid, mxCfgIp);
   mlUdpUp = false;
 }
 
 static void mixerIpEdit() {
-  ipInputBegin(&mxCfgIp, mxNetSsid[0] ? mxNetSsid : "Mixer IP", nullptr);
+  ipInputBegin(&mxCfgIp, gNetSsid[0] ? gNetSsid : "Mixer IP", nullptr);
   gIpAllowDemo = true;
   gIpDemo = mixerDemoStart;
   gIpApply = mixerIpSync;
@@ -3240,7 +3374,7 @@ static const CfgItem MIXER_CFG_ITEMS[] = {
   { "IP", C_ACT, nullptr,0,0,0, nullptr,0, nullptr, mixerIpEdit, fmtMixerIp,
     nullptr, mixerIpLabel, nullptr },
   ITEM_ACT ("Clear IP",  mixerIpClear),
-  ITEM_LINK("Networks...", AppMixerNets),
+  ITEM_LINK("Networks...", AppNetworks),
   ITEM_ACT ("Demo Mode", mixerDemoStart),
   ITEM_INT ("OSC Port",  mxCfgPort,      1,65535, 1, ""),
   ITEM_ENUM("Enc Btn",   mxCfgEncBtn, OPT_MX_ENC),
@@ -3301,6 +3435,14 @@ static bool spkIpSet() { return spCfgIp != 0; }
 /* The window has to outlast the poll interval, which now backs off when the
  * speaker is quiet. At 4s a backed-off poll cadence looked like a dead link
  * even while writes were succeeding. */
+/* Nothing has been heard from the NEW address, and the old address's history
+ * must not be read as evidence about it. */
+static void spkNoteAddressChange() {
+  spkOnline = false;
+  spkLastOk = 0;
+  spkFailStreak = 0;
+}
+
 static bool spkLinkOk() {
   uint32_t win = 4000 + (uint32_t)spCfgPollMs * 4;
   return spkOnline && !elapsed(spkLastOk, win);
@@ -3654,7 +3796,16 @@ static void spcTick() {
   }
 }
 
+/* The speaker address belongs to the network it was found on, so every write
+ * has to land in the per-SSID table too. Without this the setting would take
+ * effect and then be overwritten by the table on the next connect. */
+static void spkIpSync() {
+  if (gNetSsid[0]) nvNetSetSpk(gNetSsid, spCfgIp);
+  spkNoteAddressChange();
+}
+
 static void spkAfterConfigured() {
+  spkIpSync();
   nvTouch();
   nvFlush();
   if (gSpkGateway && gAfterConnect) {
@@ -3670,7 +3821,7 @@ static void spcSelect() {
   if (spcPhase != 2 || !spcN) return;
   IPAddress a;
   if (!a.fromString(spcDev[spcSel].ip)) return;
-  spCfgIp = (int32_t)(uint32_t)a;
+  spCfgIp = (int32_t)(uint32_t)a;      // spkAfterConfigured() records it
   snprintf(spName, sizeof(spName), "%s", spcDev[spcSel].name);
   spkAfterConfigured();
 }
@@ -4610,6 +4761,8 @@ static const char *spsTitle() {
   return "Speaker: Offline";
 }
 
+static const char *spkIpLabel() { return gNetSsid[0] ? "Manual IP (this net)" : "Manual IP"; }
+
 static void fmtSpeakerIp(char *b, size_t n) {
   if (!spkIpSet()) snprintf(b, n, "Setup");
   else snprintf(b, n, "%s", spkIp().toString().c_str());
@@ -4617,19 +4770,28 @@ static void fmtSpeakerIp(char *b, size_t n) {
 
 static const char *const OPT_CENTER[] = { "Auto", "Mute", "Play/Pause" };
 static const char *const OPT_BOTTOM[] = { "Show", "Hide" };
-static const char *const OPT_KNOB[]   = { "Auto", "Volume", "Progress" };
+static const char *const OPT_SPMODE[] = { "Speaker default", "Spotify default",
+                                          "Spotify only" };
+static const char *const OPT_TITLE[]  = { "Show album", "Wrap song", "Automatic" };
+static const char *const OPT_TITLEOV[] = { "One line", "Two lines" };
+
+// Only Wrap and Automatic can ever run out of rows; Show album never wraps.
+static bool spsOverShown() { return spCfgTitle != 0; }
 
 static void spsScanLink() { navPush(&AppSonyScan); }
 static void spsIpEdit() {
-  ipInputBegin(&spCfgIp, "Speaker IP", spkAfterConfigured);
+  ipInputBegin(&spCfgIp, gNetSsid[0] ? gNetSsid : "Speaker IP", spkAfterConfigured);
   gIpAllowDemo = false;
   gIpDemo = nullptr;
+  gIpApply = spkIpSync;              // Clear has to persist as Commit does
   navPush(&AppIpInput);
 }
 
 static const CfgItem SPEAKER_ITEMS[] = {
   ITEM_ACT ("Scan...",      spsScanLink),
-  ITEM_ACTF("Manual IP",    spsIpEdit, fmtSpeakerIp),
+  { "Manual IP", C_ACT, nullptr,0,0,0, nullptr,0, nullptr, spsIpEdit, fmtSpeakerIp,
+    nullptr, spkIpLabel, nullptr },
+  ITEM_LINK("Networks...",  AppNetworks),
   ITEM_LINK("Speaker info", AppSpeakerInfo),
   ITEM_INT ("Poll",      spCfgPollMs,   200, 3000, 50, "ms"),
   ITEM_INT ("State Poll",spCfgStateMs,  500, 8000,100, "ms"),
@@ -4638,14 +4800,17 @@ static const CfgItem SPEAKER_ITEMS[] = {
   ITEM_INT ("Vol Min",   spCfgVolMin,     0,  100,  1, ""),
   ITEM_INT ("Vol Max",   spCfgVolMax,     1,  100,  1, ""),
   ITEM_ENUM("Centre Btn", spCfgCenterBtn, OPT_CENTER),
-  ITEM_ENUM("Knob",       spCfgKnobMode, OPT_KNOB),
+  ITEM_ENUM("Mode",       spCfgMode, OPT_SPMODE),
+  ITEM_ENUM("Title",      spCfgTitle, OPT_TITLE),
+  { "If Too Long", C_ENUM, &spCfgTitleOver, 0, 1, 1, OPT_TITLEOV, 2,
+    nullptr, nullptr, nullptr, nullptr, nullptr, spsOverShown },
   ITEM_ENUM("Progress",   spCfgBottom, OPT_BOTTOM),
   ITEM_INT ("Scroll",     spCfgScroll,   50, 500,50, "ms"),
   ITEM_LINK("Spotify",    AppSpotifyMenu),
   ITEM_LINK("Playback",   AppPlayback),
 };
-static CfgPage PageSpeaker = { "Speaker", SPEAKER_ITEMS, 15, 0, false, spsTitle };
-static_assert(sizeof(SPEAKER_ITEMS) / sizeof(SPEAKER_ITEMS[0]) == 15, "PageSpeaker row count");
+static CfgPage PageSpeaker = { "Speaker", SPEAKER_ITEMS, 18, 0, false, spsTitle };
+static_assert(sizeof(SPEAKER_ITEMS) / sizeof(SPEAKER_ITEMS[0]) == 18, "PageSpeaker row count");
 static void spsEnter() { cfgOpen(&PageSpeaker); }
 
 // Entered as a prerequisite gate, backing out returns home, matching Wi-Fi.
@@ -4786,6 +4951,7 @@ static uint32_t spaChangeMs = 0, spaSendMs = 0, spaUserMs = 0, spaPendMs = 0;
 static bool     spaSeeking = false, spaCPrev = false, spaAPrev = false;
 static bool     spaHoldFired = false;
 static uint32_t spaLinkOkMs = 0;  // last time the speaker was answering
+static bool     spaSpkSeen = false;  // has the speaker answered this session?
 
 static uint8_t  spaSeekBtn = 0;                 // 1 = forward, 2 = back
 static uint32_t spaSeekStart = 0, spaSeekLast = 0;
@@ -4805,8 +4971,13 @@ static bool     spaEncPrev = false, spaEncTurned = false;
 
 static void spaEnter() {
   knobResetSteps();
-  spaLinkOkMs = millis();      // presume present until the first poll answers
-  spkActive = true;
+  /* Speaker default presumes an answer is coming and starts on volume;
+   * Spotify default waits to be shown one. Both converge the moment the
+   * speaker actually replies. */
+  spaSpkSeen = (spCfgMode == 0);
+  spaLinkOkMs = millis();
+  // Spotify only: do not put the speaker on the wire at all.
+  spkActive = (spCfgMode != 2);
   syActive = true;
   spkQuiet(0);
   spkLastVolPoll = spkLastStatePoll = 0;
@@ -4845,11 +5016,16 @@ static bool spaSeekArmed();
  * moved and changed nothing. Reachability is the question that survives
  * leaving the house.
  *
- * spkLinkOk() on its own is far too eager to answer no: spkOnline drops on a
- * single refused poll, so one lost packet would rebuild the whole layout.
- * A sustained silence is the test, and the same timer doubles as the grace
- * period at entry, when the first poll is still in flight and the link has
- * not yet had a chance to say anything.
+ * No address for this network is an instant no, and since v10.4 that is the
+ * common case away from home: the address is stored per SSID, so there is
+ * nothing to presume about and no wait to sit through.
+ *
+ * With an address, spkLinkOk() on its own is far too eager to answer no:
+ * spkOnline drops on a single refused poll, so one lost packet would rebuild
+ * the whole layout. A sustained silence is the test. Whether that silence is
+ * believed before the speaker has ever answered is what Mode decides -- and
+ * once it has answered, all modes behave alike, because by then it is not a
+ * presumption any more.
  *
  * A speaker that is switched off counts as absent, and should: the volume
  * knob does nothing either way, so the playhead is strictly the better use of
@@ -4858,17 +5034,15 @@ static bool spaSeekArmed();
 static const uint32_t SPK_GONE_MS = 6000;
 
 static bool spaSpkPresent() {
-  if (!spkIpSet()) return false;
+  if (spCfgMode == 2) return false;              // Spotify only: never ask
+  if (!spkIpSet()) return false;                 // no speaker on this network
   if (spkLinkOk()) return true;
+  if (!spaSpkSeen) return false;                 // nothing has answered yet
   return !elapsed(spaLinkOkMs, SPK_GONE_MS);
 }
 
 // What the knob is driving right now.
-static bool spaKnobProgress() {
-  if (spCfgKnobMode == 1) return false;          // Volume, always
-  if (spCfgKnobMode == 2) return true;           // Progress, always
-  return !spaSpkPresent();                       // Auto
-}
+static bool spaKnobProgress() { return !spaSpkPresent(); }
 
 // ...and whether there is anything for it to drive.
 static bool spaScrubArmed() {
@@ -4999,7 +5173,7 @@ static void spaTick() {
 
   spkService();
   syService();
-  if (spkLinkOk()) spaLinkOkMs = millis();
+  if (spkLinkOk()) { spaLinkOkMs = millis(); spaSpkSeen = true; }
 
   if (spaPending) {
     if (spkVol == spaSent) spaPending = false;
@@ -5185,6 +5359,36 @@ static void fmtClock(char *b, size_t n, int sec, bool neg) {
   snprintf(b, n, "%s%d:%02d", neg ? "-" : "", sec / 60, sec % 60);
 }
 
+/* Split a string across two rows, breaking on a space where one is available.
+ *
+ * The break is the LAST space that still fits on row one, which is what makes
+ * row two as short as it can be and so as likely as possible to fit. A title
+ * with no usable space (one very long word) breaks mid-word rather than
+ * refusing to wrap, since half a word on screen still beats a marquee.
+ *
+ * Returns false when row two is still too long, which is the caller's cue
+ * that two rows are not enough for this title. */
+static bool spaWrap2(const char *s, char *a, size_t na, char *b, size_t nb,
+                     int cols) {
+  a[0] = b[0] = 0;
+  int len = (int)strlen(s);
+  if (cols < 1) return false;
+  if (len <= cols) { snprintf(a, na, "%s", s); return true; }
+
+  int brk = -1;
+  for (int i = 0; i < len && i <= cols; i++) if (s[i] == ' ') brk = i;
+
+  int aLen, bStart;
+  if (brk > 0) { aLen = brk; bStart = brk + 1; }   // drop the space itself
+  else         { aLen = cols; bStart = cols; }     // one long word: hard break
+
+  if (aLen > (int)na - 1) aLen = (int)na - 1;
+  memcpy(a, s, aLen);
+  a[aLen] = 0;
+  snprintf(b, nb, "%s", s + bStart);
+  return (int)strlen(b) <= cols;
+}
+
 /* Layout: title, artist, progress bar and its clocks up top; volume occupies
  * the bottom third. Gaps are deliberately uneven so each block reads as a
  * group rather than as evenly spaced lines.
@@ -5211,7 +5415,6 @@ static void spaDraw() {
                 : syErr[0] ? syErr
                 : (gSyBusy || !syPolled) ? "Contacting Spotify..."
                 : "Spotify idle - no device";
-  drawRowText(0, t);
 
   /* With no track, the artist row is free -- use it for the last HTTP code
    * and body size rather than making the user go and find Speaker info. */
@@ -5225,9 +5428,40 @@ static void spaDraw() {
                  : !wifiOnline() ? "Wi-Fi offline"
                  : (spkIpSet() && !spkLinkOk() && showVol) ? "speaker no response"
                  : spkMute ? "MUTED" : "";
-  // Album only where there is a row for it; with the volume bar there is not.
-  if (!showVol) drawRowText(12, syAlbum);
-  drawRowText(showVol ? 12 : 24, a2);
+  /* Rows 0 and 1 belong to the title and the album between them.
+   *
+   * With the volume bar there is only one row to give, so the title takes it
+   * and marquees if it must. Without it there are two, and which of them the
+   * album gets depends on whether the title needs the second one. The artist
+   * stays on row 2 in every case: letting it move would make the layout jump
+   * between tracks, which is a worse cost than an occasional empty row. */
+  if (showVol) {
+    drawRowText(0, t);
+    drawRowText(12, a2);
+  } else {
+    int cols = uiCols();
+    char w1[40], w2[sizeof(syTitle)];
+    bool fits2 = spaWrap2(t, w1, sizeof(w1), w2, sizeof(w2), cols);
+    bool oneRow = (int)strlen(t) <= cols;
+    bool wrap;
+
+    if (oneRow)                  wrap = false;                 // nothing to gain
+    else if (spCfgTitle == 0)    wrap = false;                 // album always wins
+    else if (fits2)              wrap = true;                  // two rows are enough
+    else                         wrap = (spCfgTitleOver == 1);  // too long even so
+
+    if (wrap) {
+      // drawRowText marquees only the rows that overflow, so on a title that
+      // needed a hard break it is row two alone that moves.
+      drawRowText(0, w1);
+      drawRowText(12, w2);
+    } else {
+      drawRowText(0, t);
+      // Wrap mode never shows the album, even when it has the row spare.
+      if (spCfgTitle != 1) drawRowText(12, syAlbum);
+    }
+    drawRowText(24, a2);
+  }
 
   /* spCfgBottom had a settings row and a stored value but nothing ever read
    * it, so "Progress: Hide" did nothing at all. Default is Show, so honouring
@@ -6308,7 +6542,7 @@ static void mixerLaunch() {
     return;
   }
   if (!mixerIpSet()) {
-    ipInputBegin(&mxCfgIp, mxNetSsid[0] ? mxNetSsid : "Mixer IP", mixerIpThenRun);
+    ipInputBegin(&mxCfgIp, gNetSsid[0] ? gNetSsid : "Mixer IP", mixerIpThenRun);
     gIpAllowDemo = true;
     gIpDemo = mixerDemoStart;
     gIpApply = mixerIpSync;
@@ -6385,7 +6619,7 @@ static void registerApps() {
     &AppSpotifySetup, &AppSpotifyMenu, &AppPlayback, &AppAbout,
     &AppNeoPixel, &AppNpGlobal, &AppNpMixer, &AppNpSpeaker, &AppColourEdit,
     &AppBattery, &AppSleepMenu, &AppBattWarn, &AppChargeWait, &AppNpTest,
-    &AppMixerNets, &AppNpMxAuto,
+    &AppNetworks, &AppNetDetail, &AppNpMxAuto,
   };
   ALL_APPS_N = sizeof(list) / sizeof(list[0]);
   for (int i = 0; i < ALL_APPS_N; i++) ALL_APPS[i] = list[i];
@@ -6459,7 +6693,7 @@ void setup() {
   analogReadResolution(12);
 
   nvLoad();
-  mxNetMigrate();      // before the first adopt can zero the legacy address
+  netProfileMigrate();      // before the first adopt can zero the legacy address
 
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!display.begin(OLED_ADDR, true)) Serial.println("SH1107 begin() FAILED");
@@ -6506,7 +6740,7 @@ void setup() {
 
 void loop() {
   knobUpdate();
-  mxNetService();
+  netProfileService();
   mlTick();
   /* Skip polling entirely while the wake press is still held. Previously the
    * guard was evaluated and then ignored, so buttonsPoll() saw the button

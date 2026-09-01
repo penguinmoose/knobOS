@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.3**
+**Current version: 10.4**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -145,8 +145,8 @@ instant you pause rather than waiting for the cloud to confirm.
 **With no speaker, the knob seeks instead.** A volume bar with nothing behind
 it is a control that does nothing, so it goes, and the progress block takes the
 bottom third of the screen at twice the bar height. The artist moves down a
-line and the album takes the gap under the title, so the layout is title,
-album, artist, progress. One detent moves the
+line and the row under the title goes to the album, or to a second line of
+title. One detent moves the
 playhead by Knob Rate A, or Knob Rate B while the shaft button is held (the
 same two-rate arrangement as the mixer fader, and B may be the larger of the
 two). Acceleration is opt-in per rate, so spinning fast covers more ground.
@@ -159,14 +159,47 @@ playback, so the track keeps running while you scrub.
 In seek mode the shaft button doubles as the rate selector, so its click is
 decided on release: a hold that moved the knob was a rate, not a play/pause.
 
-Settings → Speaker → **Knob** overrides the choice (`Auto` | `Volume` |
-`Progress`). Auto means volume when a speaker is *reachable*, not merely when
-an address is stored: the address is global, so it comes with you when you
-leave the house, and a stored address is no evidence a speaker is in the room.
-A speaker that is switched off counts as absent too, since the volume knob
-does nothing either way and the playhead is a better use of it. The switch
-takes six seconds of silence, so one dropped packet does not rebuild the
-layout.
+### Title, or album
+
+The row under the title is contested. Settings → Speaker → **Title** decides:
+
+| Mode | Does |
+|---|---|
+| `Show album` | Album always gets the row; a long title marquees on one line |
+| `Wrap song` | Title takes the row when it needs a second line |
+| `Automatic` | Wraps only when the title needs it, shows the album otherwise |
+
+Wrapping breaks on the last space that still fits the first row, which makes
+the second row as short as possible and so as likely as possible to fit. A
+single long word breaks mid-word rather than refusing to wrap.
+
+**If Too Long** covers a title that will not fit even two rows: `One line`
+collapses to a single marquee and gives the row back to the album, `Two lines`
+wraps anyway and lets the second row scroll. Because the split fills the first
+row first, it is usually the second row alone that moves.
+
+The artist stays on the third row in every case. Letting it move would make the
+layout jump between tracks, which is a worse cost than an occasional empty row.
+
+**The soundbar address is stored per network**, like the console address, so
+on a network with no speaker on it the app is in Spotify mode from the first
+frame rather than spending six seconds proving there is nothing to talk to.
+Settings → Speaker → **Networks...** reaches the same list as the mixer's;
+each row holds both addresses for that network.
+
+Settings → Speaker → **Mode** picks which half leads:
+
+| Mode | Does |
+|---|---|
+| `Speaker default` | Presumes a speaker is there and falls back to Spotify if none answers |
+| `Spotify default` | Starts on the playhead and switches to volume once a speaker answers |
+| `Spotify only` | Never puts the speaker on the wire at all |
+
+All three end up in the same place once the facts are in; they differ only in
+what is presumed while the first poll is still in flight. A speaker that is
+switched off counts as absent, since the volume knob does nothing either way.
+Once one has answered, losing it takes six seconds of silence, so a dropped
+packet does not rebuild the layout.
 
 ### Mixer Control
 

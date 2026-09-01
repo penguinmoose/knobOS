@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.3** · single file, `knob_os.ino`, ~6,500 lines
+**Current version: 10.4** · single file, `knob_os.ino`, ~6,700 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -223,16 +223,28 @@ be unique; there are ~80.
 
 ## 4. Devices and protocols
 
+### Per-network addresses (both devices)
+
+**Console and soundbar addresses are per SSID**, in one table keyed by name
+(not by saved-network index — that list reorders on every connect).
+`mxCfgIp` and `spCfgIp` are the pair for the network currently joined, adopted
+by `netProfileService()` (polled once a second; `WiFi.SSID()` builds a String,
+so never per loop pass). Adopting replaces both, **including with zero** —
+that is what makes "nothing here" instant rather than discovered.
+
+`netProfileMigrate()` runs once at boot, gated on the `mnVer` key (1 = console
+rescued in v10.0, 2 = soundbar in v10.4). It cannot run on first connect: the
+first adopt would zero and flush the only copy first. Neither address recorded
+its network, so the console goes to the most recently saved one and the
+soundbar to `wifiSsid`.
+
+**Known gap:** setting an address while offline leaves `gNetSsid` empty, so
+`spkIpSync()` / `mixerIpSync()` have nothing to key on and the next connect
+adopts over it. Both rows drop the "(this net)" suffix when offline as a hint.
+
 ### Midas M32R (mixer) — UDP OSC, port 10023
-- **The console address is per SSID**, not global. `mxCfgIp` is the address
-  for the network currently joined, adopted by `mxNetService()` (polled once a
-  second — `WiFi.SSID()` builds a String, so not per loop pass) from a table
-  keyed by SSID. Keyed by name and not by saved-network index, because that
-  list reorders on every connect. With no entry the link stays entirely off
-  the wire and the launch gate behaves as if nothing were configured.
-  `mxNetMigrate()` runs once at boot to rescue a pre-10.0 global address;
-  it cannot run on first connect, because the first adopt would zero and flush
-  the only copy first.
+- With no entry for the current network the link stays entirely off the wire
+  and the launch gate behaves as if nothing were configured.
 - `/xremote` resubscribe every ~4s.
 - Fader is 0..1 with a piecewise taper (0.75 = 0 dB).
 - `/meters/0` = 70 little-endian floats: `[0..31]` ch, `[32..39]` aux,
@@ -279,6 +291,11 @@ is the entire reason Spotify Web API integration exists. Local transport verbs
   last `artists` before it is the track's list rather than the album's. This is
   a key-ordering assumption and is the fragile part.
 - 404 on a transport call is `NO_ACTIVE_DEVICE`, not a failure.
+- **Title vs album share row 1.** `spaWrap2()` breaks on the last space that
+  still fits row 0, which minimises row 1 and maximises the chance it fits; a
+  single long word hard-breaks. `spCfgTitle` picks who gets the row and
+  `spCfgTitleOver` handles a title too long for two. The artist is pinned to
+  row 2 in every case so the layout cannot jump between tracks.
 - **The album name is found backwards.** Reading forward from `album` finds the
   album ARTIST's name, since inside the album object the keys run album_type,
   artists, ..., name. The album's own name is the last `"name"` between the
@@ -352,12 +369,17 @@ rates (Knob Rate A, Knob Rate B while the shaft is held), acceleration opt-in
 per rate, local sweep with the resting position sent 400ms after the knob
 stops. `Settings → Speaker → Knob` forces `Auto | Volume | Progress`.
 
-**Auto keys off reachability, not on whether an address is stored** (v10.2).
-The speaker address is global, so it travels with the device; a stored address
-is no evidence of a speaker in the room. `spkLinkOk()` alone is unusable here
-because `spkOnline` drops on a *single* refused poll, so the test is six
-seconds of sustained silence (`spaLinkOkMs` / `SPK_GONE_MS`), which doubles as
-the entry grace period while the first poll is still in flight.
+**Presence is reachability, not a stored address** (v10.2). `spkLinkOk()`
+alone is unusable because `spkOnline` drops on a *single* refused poll, so the
+test is six seconds of sustained silence (`spaLinkOkMs` / `SPK_GONE_MS`).
+Since v10.4 the address itself is per-SSID, so on a network with no speaker
+`spkIpSet()` is false and the answer is instant — no wait at all.
+
+`spCfgMode` (Speaker default / Spotify default / Spotify only) only sets
+`spaSpkSeen` at entry, i.e. what is presumed before the first reply. Once the
+speaker has answered, every mode behaves identically, because by then it is
+not a presumption. Spotify only additionally leaves `spkActive` false, so
+nothing reaches the wire.
 
 **The shaft button's click is decided on RELEASE while seeking**, because the
 same button selects the second rate. `spaEncTurned` records whether the hold
@@ -442,14 +464,9 @@ Spotify `...` indicator latched on permanently. Always brace.
 
 ## 7. Known-open items
 
-0. **The speaker address is still global.** The console address became
-   per-SSID in 10.0; the Sony address did not, so away from home the device
-   keeps polling an IP belonging to another network (backed off to roughly one
-   request every 8s). It wants the same per-SSID treatment — the table and the
-   Networks page already exist and would need a second column.
-0. **After upgrading to 10.0, check Settings → Mixer → Networks...** The old
-   single console address is migrated onto the most recently saved network,
-   which is a guess — the network it actually belonged to was never recorded.
+0. **After upgrading, check Settings → Mixer (or Speaker) → Networks...** Both
+   old single addresses are migrated onto a guessed network, since neither
+   recorded the one it actually belonged to.
 1. ~~**Spotify TLS connect fails with `-1`**~~ — diagnosed and fixed in v9.9.
    The internal heap could not hold mbedTLS's two 16KB record buffers; see the
    TLS memory section in §4. **Needs confirming on hardware:** Speaker info

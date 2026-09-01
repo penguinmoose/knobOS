@@ -1,6 +1,6 @@
 # Changelog
 
-**Current version: 10.3**
+**Current version: 10.4**
 
 Major version = a new mini-app or a new subsystem. Minor version = tweaks, bug fixes, UI work.
 
@@ -489,3 +489,17 @@ The status line under the progress bar is gone. It spent its life announcing a s
 So the no-speaker layout is now title, album, artist, progress: the artist moves down a line and the album takes the gap under the title. The album name has to be found backwards. Reading forward from `album` lands on the album ARTIST's name, since inside the album object the keys run album_type, artists, ..., name; the album's own name is the last `"name"` between the `album` key and the track's own `artists`. Bounded at the front by that key, so an item with no album at all — a podcast episode — cannot walk back into `device` and report the soundbar's name as the album. Verified against a pretty-printed sample, multiple album artists, an episode, and `"album_type" : "album"`, whose value must not be mistaken for the key.
 
 Also wired up spCfgBottom. "Progress: Show | Hide" had a settings row and a stored value that nothing ever read, so the setting did nothing; the documentation described it as working. Default is Show, so honouring it changes nothing for anyone who had not gone looking.
+
+### v10.4
+
+The soundbar address is now per network, the way the console address has been since v10.0. It was the last thing the device carried between rooms as though it applied everywhere: away from home the speaker app spent six seconds of silence proving there was nothing to talk to, offering a volume bar the whole time. With no address for the network, there is nothing to prove and the app is in Spotify mode from the first frame.
+
+Both addresses now live in one per-SSID table, and adopting a network replaces both, including with zero. Zero is the point: it is what turns "no speaker here" from something to be discovered into something already known. Settings > Speaker > Networks... reaches the same list as the mixer's, and each row opens the two addresses for that network.
+
+Migration runs at boot, gated on a version key, because the table is no longer empty by the time the second address is added. Neither address recorded which network it belonged to, so each gets the best guess available: the console goes to the most recently saved network, the soundbar to the network the device is configured to join, since a soundbar lives where the device lives. The Networks page shows where they landed.
+
+New Mode setting: Speaker default, Spotify default, Spotify only. All three end up in the same place once the facts are in and differ only in what is presumed while the first poll is in flight, which is the couple of seconds the user actually sees. Speaker default presumes an answer is coming; Spotify default waits to be shown one; Spotify only never puts the speaker on the wire. This replaces Knob (Auto | Volume | Progress), whose Volume option forced a control that did nothing.
+
+The row under the title is contested: the album wants it, and a long title wants it as a second line. Title picks who gets it — Show album, Wrap song, or Automatic, which wraps only when the title needs it and shows the album otherwise. Wrapping breaks on the last space that still fits row one, which makes row two as short as possible and so as likely as possible to fit; a single long word breaks mid-word rather than refusing, since half a word beats a marquee. If Too Long covers the case where two rows are still not enough: One line collapses to a single marquee and gives the row back to the album, Two lines wraps anyway and lets row two scroll. Because the split fills row one first, it is usually row two alone that moves.
+
+The artist stays on row 2 in every case. Letting it move would make the layout jump between tracks, which is a worse cost than an occasional empty row.
