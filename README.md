@@ -1,7 +1,7 @@
 # KnobOS
 **Current version: 10.0**
 
-A control device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
+A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
 It has two functional miniapps: Speaker control, and Mixer control. Using the Mixer miniapp, it can control a **Midas M32R** mixing
 console over OSC. With the Speaker miniapp, it can control the volume of a Sony soundbar over Sony's local HTTP API, and
@@ -25,7 +25,7 @@ configuration via NVS, battery monitoring, and sleep.
 | **Adafruit 128×64 OLED FeatherWing** | SH1107 at I²C `0x3C`, mounted upside down (rotation 3). Carries buttons A/B/C. |
 | **EC11 / KY-040 rotary encoder** | Quadrature + shaft button. |
 | **12-pixel NeoPixel ring** | Pixel 0 at 6 o'clock, advancing clockwise. V+ to **BAT, not 3V3**. |
-| **21700 Li-ion, 5000mAh** | On the FeatherS2's battery port. |
+| **21700 Li-ion** | On the FeatherS2's battery port in parallel with NeoPixel power. |
 
 ### Pin map
 
