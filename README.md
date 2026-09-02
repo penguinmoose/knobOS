@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.5**
+**Current version: 10.6**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -509,8 +509,11 @@ the parts of this codebase that look arbitrary.
 
 ## Known limitations
 
-1. **NeoPixel fails to start on roughly 20% of boots**, cleared by a reset.
-   Under investigation; the Test page distinguishes driver from wiring.
+1. **NeoPixel occasionally failed to start**, cleared by a reset. Traced in
+   v10.6 to a mutex the library strands when its RMT init fails, which leaves
+   every later `show()` a silent no-op. The channel is now claimed before the
+   library asks for it and re-checked rather than latched. The Test page
+   reports `buf` and `rmt` so a recurrence says which half is missing.
 2. **Deep sleep can only wake on the shaft button** — a hardware limit of the
    S2's RTC GPIO range, not a software choice. Light sleep has no such limit
    and is the default.

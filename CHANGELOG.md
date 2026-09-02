@@ -1,6 +1,6 @@
 # Changelog
 
-**Current version: 10.5**
+**Current version: 10.6**
 
 Major version = a new mini-app or a new subsystem. Minor version = tweaks, bug fixes, UI work.
 
@@ -515,3 +515,17 @@ The shaft button is now a modifier everywhere, so what a press means is not know
 The ring follows the knob rather than the app: mid-seek it shows the playhead in the Rate B colour even though everything else is still on volume.
 
 Also closed a comment that lost its terminator in an edit outside the changelog, which had swallowed the battery-sensing block into the NeoPixel one. No effect on the build beyond a warning, but the paragraph had stopped being a paragraph.
+
+### v10.6
+
+The NeoPixel failing to start on some boots and coming right after a reset is a stuck semaphore inside the library, not a wiring or allocation fault.
+
+Adafruit_NeoPixel's ESP-IDF 5 backend takes a mutex around every show(). On one path — rmtInit() failing — it returns without giving that mutex back. Every later show() then times out on it and does nothing, silently, for the rest of the session. A ring that is dead until the next boot is exactly what that produces. There is a second, quieter one: the mutex is created once from a global constructor and never retried, so a single failed allocation there would make show() a no-op forever.
+
+Both are now routed around rather than waited on. The RMT channel is claimed in npBegin() before the library ever asks for it, with retries, and espInit() is called again in case the constructor's mutex never appeared. rmtInit() returns true immediately when the pin is already a TX channel at the same frequency and block size, so once the claim succeeds the library's own call is a no-op that cannot fail and cannot strand anything. The parameters have to match its call exactly or it tears the channel down and builds its own.
+
+The claim is re-checked rather than latched, because pinMode() detaches the channel through the peripheral manager and sleepPrepare() parks the data line that way before every sleep. show() is never called before the check passes, since that call is the one that would strand the mutex and make the failure permanent. A ring that misses its start now comes up on its own instead of waiting for a reset.
+
+Which of the two failures is actually being hit is not yet known, so the NeoPixel Test page reports both: buf is the library's pixel buffer, rmt is the channel driving the line, and either one missing means nothing will ever light. Neither was distinguishable from bad wiring before.
+
+Button presses are debounced properly. A release inside the defer window was dispatched at once so a quick tap would not be lost, but a contact bounce looks exactly like one — and dispatching on it delivered the press twice, once there and again when the button settled and the timer expired. A press shorter than 6ms is now treated as bounce; a human tap is tens of milliseconds. Verified against the real function with an injected waveform: a 2ms bounce followed by a real press gave two presses before and gives one now, while a genuine 10ms tap still registers.

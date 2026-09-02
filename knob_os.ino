@@ -15,12 +15,12 @@
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 10.5                        (changelog in CHANGELOG.md)
+ *  KNOB OS  --  version 10.6                        (changelog in CHANGELOG.md)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "10.5"
+#define KNOB_OS_VERSION "10.6"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -38,6 +38,9 @@
 #include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <mbedtls/platform.h>
+// Lets npRmtOk() ask whether the NeoPixel pin is still an RMT channel rather
+// than trusting a flag; pinMode() elsewhere silently takes it away.
+#include <esp32-hal-periman.h>
 
 /* ###########################################################################
  * #                      FORWARD TYPE DECLARATIONS                          #
@@ -231,6 +234,12 @@ static const int ROWS_VIS = 4;
 static const int SCROLL_X = 107;
 
 static const uint32_t COMBO_MS   = 18;   // non-chord buttons: debounce only
+/* Shortest press that counts as a tap. A release inside the defer window is
+ * dispatched at once so a quick tap is not lost, but a contact bounce looks
+ * exactly like one -- and dispatching on it delivers the press twice, once
+ * there and again when the button settles and the timer expires. A human tap
+ * is tens of milliseconds; a bounce is one or two. */
+static const uint32_t TAP_MIN_MS = 6;
 static const uint32_t DISPLAY_MS = 50;
 // Quadrature transitions per mechanical detent on a typical EC11.
 static const int ENC_DEFAULT_DIV = 4;
@@ -1172,18 +1181,74 @@ static inline int32_t npRGB(int r, int g, int b) {
   return ((int32_t)(r & 0xFF) << 16) | ((int32_t)(g & 0xFF) << 8) | (b & 0xFF);
 }
 
+/* ---- claiming the RMT channel ourselves ---------------------------------
+ *
+ * The ring failing to start on some boots and coming right after a reset is
+ * a stuck semaphore inside the library.
+ *
+ * Adafruit_NeoPixel's ESP-IDF 5 backend takes a mutex around every show().
+ * On one path -- rmtInit() failing -- it returns WITHOUT giving that mutex
+ * back. Every later show() then times out on it and does nothing, silently,
+ * for the rest of the session. A ring that is dead until the next boot is
+ * exactly what that produces. (There is a second, quieter one: the mutex is
+ * created once from a global constructor and never retried, and if that
+ * allocation failed show() would be a no-op forever.)
+ *
+ * So the channel is claimed here, before the library ever asks for it.
+ * rmtInit() returns true immediately when the pin is already a TX channel at
+ * the same frequency and block size, so once this succeeds the library's own
+ * call becomes a no-op that cannot fail and cannot strand anything. The
+ * parameters must match its call exactly (10MHz, one memory block) or it
+ * will tear this down and build its own.
+ *
+ * Re-checked rather than latched: pinMode() detaches the channel through the
+ * peripheral manager, and sleepPrepare() parks the data line that way before
+ * every sleep. */
+static bool     npRmtReady = false;
+static uint32_t npRmtTry = 0;
+
+static bool npRmtOk() {
+  if (npRmtReady && perimanGetPinBusType(PIN_NEO) == ESP32_BUS_TYPE_RMT_TX)
+    return true;
+  /* Either it was never claimed or something detached it. Re-claim at once in
+   * the second case; rate-limit the first, so hardware that is genuinely
+   * refusing is not asked twenty times a second. */
+  if (npRmtReady || elapsed(npRmtTry, 500)) {
+    npRmtTry = millis();
+    npRmtReady = rmtInit(PIN_NEO, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
+    return npRmtReady;
+  }
+  npRmtReady = false;
+  return false;
+}
+
 static void npBegin() {
   // Release any pad hold left over from a previous deep sleep.
   gpio_deep_sleep_hold_dis();
   gpio_hold_dis((gpio_num_t)PIN_NEO);
-  ring.begin();
+  /* Retry the library's own mutex. It is created from a global constructor
+   * and never attempted again, so a single failure there would be permanent. */
+  espInit();
+  ring.begin();                     // pinMode() first: it would detach the RMT
   ring.setBrightness(255);          // scaling is done per pixel below
+  /* A few attempts before giving up on the claim, since the boot-time failure
+   * this is here to fix is intermittent rather than absolute. npRmtOk() keeps
+   * trying afterwards regardless, so a ring that misses its start now comes
+   * up on its own instead of waiting for a reset. */
+  /* Claimed directly rather than through npRmtOk(), whose rate limit is
+   * measured against millis() -- which is still small this early and would
+   * refuse the retries. */
+  for (int i = 0; i < 5 && !npRmtReady; i++) {
+    npRmtReady = rmtInit(PIN_NEO, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000);
+    if (!npRmtReady) delay(20);
+  }
+  npRmtTry = millis();
   ring.clear();
-  ring.show();
+  if (npRmtReady) ring.show();
   /* If the pixel buffer is null the library's malloc failed and nothing will
    * ever light, which is otherwise indistinguishable from a wiring fault. */
-  Serial.printf("[np] pin=%d n=%d buf=%s\n", PIN_NEO, NEO_N,
-                ring.getPixels() ? "ok" : "NULL");
+  Serial.printf("[np] pin=%d n=%d buf=%s rmt=%s\n", PIN_NEO, NEO_N,
+                ring.getPixels() ? "ok" : "NULL", npRmtReady ? "ok" : "FAIL");
 }
 
 static void npFrameStart() { memset(npBuf, 0, sizeof(npBuf)); npTouched = true; }
@@ -1219,7 +1284,7 @@ static uint8_t  npSent[NEO_N][3];
 static uint32_t npLastShow = 0;
 
 static void npFrameEnd() {
-  if (!npEnable) return;
+  if (!npEnable || !npRmtOk()) return;
   bool changed = memcmp(npSent, npBuf, sizeof(npBuf)) != 0;
   if (!changed || !elapsed(npLastShow, DISPLAY_MS)) { npLit = true; return; }
   npLastShow = millis();
@@ -1232,6 +1297,7 @@ static void npFrameEnd() {
 
 static void npClear() {
   if (!npLit) return;
+  if (!npRmtOk()) { npLit = false; return; }
   ring.clear();
   ring.show();
   memset(npSent, 0, sizeof(npSent));
@@ -1570,7 +1636,10 @@ static void buttonsPoll() {
     if (raw && !bs[i].down) {
       bs[i] = { true, millis(), millis(), true, false };
     } else if (!raw && bs[i].down) {
-      if (bs[i].pending && !bs[i].suppressed) dispatch((BtnId)i, EV_PRESS);
+      // Too short to be a finger: treat it as bounce and let the press that
+      // follows stand on its own.
+      if (bs[i].pending && !bs[i].suppressed && elapsed(bs[i].downMs, TAP_MIN_MS))
+        dispatch((BtnId)i, EV_PRESS);
       bs[i].down = bs[i].pending = bs[i].suppressed = false;
     }
   }
@@ -5831,7 +5900,7 @@ static uint32_t npTestMs = 0;
 static int npTestStep = 0;
 
 static void nptEnter() { knobInputMode(); npTestMode = 0; npTestStep = 0; }
-static void nptExit()  { ring.clear(); ring.show(); npLit = false; }
+static void nptExit()  { ring.clear(); if (npRmtOk()) ring.show(); npLit = false; }
 
 static void nptTick() {
   int st = knobSteps();
@@ -5850,7 +5919,7 @@ static void nptTick() {
     }
     ring.setPixelColor(i, c);
   }
-  ring.show();
+  if (npRmtOk()) ring.show();
   npLit = true;
 }
 
@@ -5859,11 +5928,15 @@ static void nptDraw() {
   static const char *names[4] = { "Chase", "All red", "All green", "All blue" };
   display.setCursor(0, 16);
   display.print(names[npTestMode]);
-  display.setCursor(0, 30);
-  display.printf("pin %d  n %d", PIN_NEO, NEO_N);
-  display.setCursor(0, 40);
-  display.printf("psram %luk tls %s", (unsigned long)(ESP.getPsramSize() / 1024),
-                 gTlsPsram ? "ps" : "int");
+  display.setCursor(0, 28);
+  /* buf is the library's pixel buffer and rmt is the channel driving the
+   * line. Either one missing means nothing will ever light, and neither is
+   * distinguishable from bad wiring without being told. */
+  display.printf("pin %d n %d buf %s", PIN_NEO, NEO_N,
+                 ring.getPixels() ? "ok" : "NUL");
+  display.setCursor(0, 38);
+  display.printf("rmt %s  psram %luk", npRmtReady ? "ok" : "FAIL",
+                 (unsigned long)(ESP.getPsramSize() / 1024));
   display.setCursor(0, 50);
   display.print("turn to change");
   drawButtonLabels(G_NONE, G_NONE, G_NONE);

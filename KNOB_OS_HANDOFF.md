@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.5** · single file, `knob_os.ino`, ~6,700 lines
+**Current version: 10.6** · single file, `knob_os.ino`, ~6,700 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -159,6 +159,10 @@ Four (`B_C`, `B_B`, `B_A`, `B_ENC`). Events: press, repeat, release.
 
 - **Back gesture is A+B.** Only chord members defer (by `Back Win`, default
   150ms); other buttons fire immediately so navigation stays snappy (v5.2).
+- **A release inside the defer window dispatches at once**, so a tap shorter
+  than the window is not lost. A bounce looks identical, so a press shorter
+  than `TAP_MIN_MS` (6ms) is discarded as bounce — without that the press
+  fired twice, once on the bounce and again when the timer expired.
 - `B_ENC` is never a chord member.
 - **`btnSelect()`** — generic screens treat the shaft click as another select.
   Apps that give it their own meaning (Speaker, Mixer, Text, Encoder Test)
@@ -254,6 +258,26 @@ adopts over it. Both rows drop the "(this net)" suffix when offline as a hint.
 - **Demo Mode** drives the real UI from a local console model, intercepted at
   `udpTx`, `mlTick`, `mlLinkOk`, `mlSendFader`, `mlRequestStrip`. No UI code
   has demo branches. The flag is deliberately not persisted.
+
+### NeoPixel — WS2812 over RMT
+
+**Adafruit_NeoPixel strands a mutex when its RMT init fails.** `espShow()`
+(ESP-IDF 5 path, `esp.c`) takes `show_mutex` around every call and returns
+*without giving it back* when `rmtInit()` fails. Every later `show()` then
+times out on the semaphore and does nothing, silently and permanently — a
+ring dead until reboot. A second, quieter one: `show_mutex` is created once
+from a global constructor and never retried.
+
+The workaround is to never let the library do the init. `npBegin()` calls
+`espInit()` (retrying the mutex) and claims the channel itself with
+`rmtInit(PIN_NEO, RMT_TX_MODE, RMT_MEM_NUM_BLOCKS_1, 10000000)`. **Those
+parameters must match `esp.c` exactly** — a mismatch makes the library tear
+the channel down and build its own, reopening the hole.
+
+`npRmtOk()` re-checks with `perimanGetPinBusType()` rather than latching a
+flag, because `pinMode()` detaches the channel and `sleepPrepare()` parks the
+data line that way before every sleep. **No `ring.show()` may be called before
+that check passes** — that call is what strands the mutex.
 
 ### Sony HT-NT5 (speaker) — HTTP JSON, `http://<ip>:10000/sony/<service>`
 No auth. Verified by probe:
@@ -479,9 +503,10 @@ Spotify `...` indicator latched on permanently. Always brace.
    TLS memory section in §4. **Needs confirming on hardware:** Speaker info
    should read `tlspool psram`, and a failure should now name an mbedTLS error
    rather than a bare `-1`.
-2. **NeoPixel fails to start ~20% of boots**, cleared by reset. Settings →
-   NeoPixel → Test drives the ring directly and reports the library's buffer
-   pointer; `buf NULL` would mean an allocation failure rather than wiring.
+2. ~~**NeoPixel fails to start ~20% of boots**~~ — traced in v10.6 to a
+   library bug, see §4. Needs confirming on hardware; Settings → NeoPixel →
+   Test now reports both `buf` (the library's pixel buffer) and `rmt` (the
+   channel driving the line).
 3. **Deep sleep can only wake on the shaft button.** GPIO 33 and 38 are outside
    the S2's RTC range (0–21) and physically cannot wake it. Light sleep has no
    such limit and is the default.
