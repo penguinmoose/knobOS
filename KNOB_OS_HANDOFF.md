@@ -1,6 +1,6 @@
 # Knob OS — Project Handoff
 
-**Current version: 10.4** · single file, `knob_os.ino`, ~6,700 lines
+**Current version: 10.5** · single file, `knob_os.ino`, ~6,700 lines
 **Board: Unexpected Maker FeatherS2 (ESP32-S2)** · FQBN `esp32:esp32:um_feathers2`
 
 A motorised-knob controller that became a rotary-encoder controller: a
@@ -381,10 +381,17 @@ speaker has answered, every mode behaves identically, because by then it is
 not a presumption. Spotify only additionally leaves `spkActive` false, so
 nothing reaches the wire.
 
-**The shaft button's click is decided on RELEASE while seeking**, because the
-same button selects the second rate. `spaEncTurned` records whether the hold
-moved the knob; if it did, it was a rate and no click fires. `spaButton()`
-returns early for `B_ENC` in that mode and `spaTick()` owns it instead.
+**`B_ENC` is a modifier, and its click is decided on RELEASE** (v10.5).
+Holding it makes the knob seek in either mode -- second rate when the knob
+already has the playhead, `Hold Seek` when the volume has it. `spaEncTurned`
+records whether the hold moved the knob; if it did, no click and no mute
+fires. `spaButton()` has no `B_ENC` case at all; `spaTick()` owns the whole
+press/hold/release decision in one block.
+
+Three seek rates, one reachable at a time: `spCfgScrubA` (free spin, no
+speaker), `spCfgScrubB` (shaft held, no speaker), `spCfgScrubHold` (shaft
+held, speaker present). Hold Seek borrows Rate B's acceleration opt-in --
+same gesture, different mode.
 
 **NeoPixel ring** — gauge with smoothing (the pixel straddling the level lights
 proportionally, so 12 pixels read as continuous), console-style zoned meter

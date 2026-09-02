@@ -1,6 +1,6 @@
 # Changelog
 
-**Current version: 10.4**
+**Current version: 10.5**
 
 Major version = a new mini-app or a new subsystem. Minor version = tweaks, bug fixes, UI work.
 
@@ -503,3 +503,15 @@ New Mode setting: Speaker default, Spotify default, Spotify only. All three end 
 The row under the title is contested: the album wants it, and a long title wants it as a second line. Title picks who gets it — Show album, Wrap song, or Automatic, which wraps only when the title needs it and shows the album otherwise. Wrapping breaks on the last space that still fits row one, which makes row two as short as possible and so as likely as possible to fit; a single long word breaks mid-word rather than refusing, since half a word beats a marquee. If Too Long covers the case where two rows are still not enough: One line collapses to a single marquee and gives the row back to the album, Two lines wraps anyway and lets row two scroll. Because the split fills row one first, it is usually row two alone that moves.
 
 The artist stays on row 2 in every case. Letting it move would make the layout jump between tracks, which is a worse cost than an occasional empty row.
+
+### v10.5
+
+Hold the shaft button and turn, and the knob seeks even with a speaker connected. Seeking was previously only reachable when nothing else wanted the knob; now the shaft button borrows it, which is the same gesture the mixer uses to reach its second fader rate.
+
+Hold Seek is its own rate rather than a reuse of Knob Rate B. Rate B is the coarse partner to a fine Rate A and the two are chosen together; this is the only seek rate available in volume mode, so it wants to sit between them rather than being whichever of the two Rate B happens to be. Default 15s per detent against 5s and 30s. Acceleration follows Rate B's opt-in, since both are the shaft-held rate and only the mode differs. Off returns the shaft button to play/pause alone.
+
+The shaft button is now a modifier everywhere, so what a press means is not known until it is released: a hold that moved the knob was a seek, and firing its click as well would toggle playback every time the user reached to scrub. Mute is the same story from the other side — it fires on a hold, and a hold that seeks is not a request to silence the room, so it now checks that the knob stayed still. All of this used to be split between spaButton() acting on press and spaTick() acting on release depending on the mode; it is one block now, and B_ENC is deliberately absent from spaButton().
+
+The ring follows the knob rather than the app: mid-seek it shows the playhead in the Rate B colour even though everything else is still on volume.
+
+Also closed a comment that lost its terminator in an edit outside the changelog, which had swallowed the battery-sensing block into the NeoPixel one. No effect on the build beyond a warning, but the paragraph had stopped being a paragraph.

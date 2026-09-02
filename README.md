@@ -1,5 +1,5 @@
 # KnobOS
-**Current version: 10.4**
+**Current version: 10.5**
 
 A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
 
@@ -137,6 +137,7 @@ immediately, so navigation stays snappy.
 | Bottom button (A) | Previous track |
 | **Hold** C or A | Cue and review: scrub forward/back, with configurable hold time, speed, granularity and acceleration |
 | Middle button (B) | Play/pause, or mute (`Centre Btn` picks; `Auto` means play/pause when Spotify is authorised) |
+| **Hold** the knob + turn | Seek, at the `Hold Seek` rate, even while a speaker has the knob |
 
 The screen shows title, artist, a progress bar and both clocks. The progress
 clock runs locally between polls, so it moves smoothly at 20fps and freezes the
@@ -156,8 +157,16 @@ stops. A Spotify seek is a round trip of a few hundred milliseconds, so one per
 detent would flood the API and lag behind the knob. Seeking does not interrupt
 playback, so the track keeps running while you scrub.
 
-In seek mode the shaft button doubles as the rate selector, so its click is
-decided on release: a hold that moved the knob was a rate, not a play/pause.
+With a speaker connected the volume has the knob, so seeking is asked for:
+hold the shaft button and turn. That rate is separate (`Hold Seek`, 15s per
+detent by default) rather than a reuse of Rate B, because it is the only seek
+rate available in that mode and wants to sit between a fine and a coarse one.
+Setting it to `Off` gives the shaft button back to play/pause alone.
+
+The shaft button is a modifier as well as a button, so its click is decided on
+release: a hold that moved the knob was a seek, not a play/pause. Mute (if you
+have the shaft set to hold-for-mute) checks the same thing, since a hold that
+seeks is not a request to silence the room.
 
 ### Title, or album
 

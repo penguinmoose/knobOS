@@ -11,16 +11,16 @@
  *                   -> Speaker  -> Scan / Manual IP / Speaker info
  *
  *  BOARD: "UM FeatherS2"  (NOT the Adafruit ESP32-S2 Feather)
- *  LIBS:  Adafruit SH110X, Adafruit GFX
+ *  LIBS:  Adafruit SH110X, Adafruit GFX, NeoPixel
  * ==========================================================================*/
 
 /* ===========================================================================
- *  KNOB OS  --  version 10.4                        (changelog in CHANGELOG.md)
+ *  KNOB OS  --  version 10.5                        (changelog in CHANGELOG.md)
  *
  *  Major version = a new mini-app or a new subsystem.
  *  Minor version = tweaks, bug fixes, UI work.
  * ========================================================================= */
-#define KNOB_OS_VERSION "10.4"
+#define KNOB_OS_VERSION "10.5"
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -160,10 +160,6 @@ static void (*gIpApply)() = nullptr;
  *   +            ->  3V3  ** NOT 5V **
  *   GND          ->  GND
  *
- * The ESP32-S2 is NOT 5V tolerant. A KY-040's onboard pull-ups tie CLK/DT to
- * whatever is on its + pin, so powering it from 5V puts 5V straight onto
- * three GPIOs. Use 3V3.
- *
  * The + pin may also be left unconnected: every line below is configured
  * INPUT_PULLUP, and the encoder's common contact goes to GND either way. The
  * module's own pull-ups then simply sit unused. Board pull-ups in parallel
@@ -190,8 +186,8 @@ static const int PIN_ENC_SW = 0;    // SW   (also the BOOT button)
  * Wire V+ to BAT, not 3V3: the ring can pull far more than the regulator is
  * meant to source. A 3.3V data line is fine at battery voltage because the
  * WS2812 logic-high threshold is 0.7 x VDD -- about 2.6V at 3.7V, which 3.3V
- * clears easily. (At 5V that threshold is 3.5V, which is why a level shifter
- * is needed there and not here.) */
+ * clears easily. */
+
 /* Battery sensing.
  *
  * The plain FeatherS2 has NO on-board battery divider -- unlike the FeatherS2
@@ -375,6 +371,12 @@ static int32_t spCfgTitleOver = 1;     // title too long for two lines:
                                        //   0 one marquee row + album, 1 two rows
 static int32_t spCfgScrubA    = 5000;  // ms of track per detent
 static int32_t spCfgScrubB    = 30000; // ...while the shaft button is held
+/* With a speaker the knob belongs to the volume, so seeking has to be asked
+ * for: hold the shaft and turn. It gets a rate of its own rather than
+ * borrowing Rate B, because it is the only seek rate available in that mode
+ * and so wants to sit between a fine and a coarse one rather than being
+ * whichever of those Rate B happens to be. 0 disables it. */
+static int32_t spCfgScrubHold = 15000; // shaft held while the knob has volume
 static int32_t spCfgScrubAcc  = 1;     // 0 off, 1 rate A, 2 rate B, 3 both
 static int32_t spCfgBottom    = 0;     // progress block: 0 show, 1 hide
 static int32_t spCfgVolHold   = 4;     // seconds the volume overlay lingers
@@ -441,6 +443,7 @@ static const NvKey NVKEYS[] = {
   { "pMode", &spCfgMode, 0 },     { "kScrA", &spCfgScrubA, 5000 },
   { "pTitle",&spCfgTitle, 2 },    { "pTitleOv", &spCfgTitleOver, 1 },
   { "kScrB", &spCfgScrubB, 30000 }, { "kScrAcc", &spCfgScrubAcc, 1 },
+  { "kScrH", &spCfgScrubHold, 15000 },
   { "nav0", &navSaved0, -1 }, { "nav1", &navSaved1, -1 },
   { "nav2", &navSaved2, -1 }, { "nav3", &navSaved3, -1 },
 };
@@ -4728,6 +4731,10 @@ static void fmtScrub(char *b, size_t n, int32_t ms) {
 }
 static void fmtScrubA(char *b, size_t n) { fmtScrub(b, n, spCfgScrubA); }
 static void fmtScrubB(char *b, size_t n) { fmtScrub(b, n, spCfgScrubB); }
+static void fmtScrubHold(char *b, size_t n) {
+  if (!spCfgScrubHold) snprintf(b, n, "Off");
+  else fmtScrub(b, n, spCfgScrubHold);
+}
 
 static const CfgItem PLAYBACK_ITEMS[] = {
   { "Hold",  C_INT, &spCfgSeekHold,  0, 2000, 50, nullptr,0, nullptr,nullptr, fmtSeekHold,  nullptr },
@@ -4740,10 +4747,14 @@ static const CfgItem PLAYBACK_ITEMS[] = {
    * the playhead. */
   { "Knob Rate A", C_INT, &spCfgScrubA, 500, 60000, 500, nullptr,0, nullptr,nullptr, fmtScrubA, nullptr },
   { "Knob Rate B", C_INT, &spCfgScrubB, 500, 60000, 500, nullptr,0, nullptr,nullptr, fmtScrubB, nullptr },
+  /* The rate for the one case the two above cannot cover: a speaker is
+   * present, so the knob is on the volume and seeking means holding the
+   * shaft. Off gives the shaft button back to play/pause alone. */
+  { "Hold Seek", C_INT, &spCfgScrubHold, 0, 60000, 500, nullptr,0, nullptr,nullptr, fmtScrubHold, nullptr },
   ITEM_ENUM("Knob Accel", spCfgScrubAcc, OPT_MX_ACC),
 };
-static CfgPage PagePlayback = { "Playback", PLAYBACK_ITEMS, 8, 0, false, nullptr };
-static_assert(sizeof(PLAYBACK_ITEMS) / sizeof(PLAYBACK_ITEMS[0]) == 8, "PagePlayback row count");
+static CfgPage PagePlayback = { "Playback", PLAYBACK_ITEMS, 9, 0, false, nullptr };
+static_assert(sizeof(PLAYBACK_ITEMS) / sizeof(PLAYBACK_ITEMS[0]) == 9, "PagePlayback row count");
 static void pbEnter() { cfgOpen(&PagePlayback); }
 
 static const App AppPlayback = {
@@ -5044,10 +5055,17 @@ static bool spaSpkPresent() {
 // What the knob is driving right now.
 static bool spaKnobProgress() { return !spaSpkPresent(); }
 
-// ...and whether there is anything for it to drive.
-static bool spaScrubArmed() {
-  return spaKnobProgress() && spCfgTransport == 0 && syHasTrack &&
-         syDurationMs > 0;
+// Is there a playhead to move at all?
+static bool spaSeekable() {
+  return spCfgTransport == 0 && syHasTrack && syDurationMs > 0;
+}
+
+// The knob seeks on its own, because nothing else wants it.
+static bool spaScrubArmed() { return spaKnobProgress() && spaSeekable(); }
+
+// The knob seeks only while the shaft is held, because the volume has it.
+static bool spaHoldSeekArmed() {
+  return !spaKnobProgress() && spaSeekable() && spCfgScrubHold > 0;
 }
 
 /* Ring output for the speaker.
@@ -5058,7 +5076,11 @@ static bool spaScrubArmed() {
  * one thing while the control moves another. */
 static void spaRing() {
   if (!npEnable || npSpMode == 0) return;
-  bool progress = (npSpMode == 3) || (npSpMode == 1 && spaKnobProgress());
+  /* Mid-seek the knob is on the playhead whatever the app is otherwise doing,
+   * and the ring shows what the knob is driving. The Rate B colour then marks
+   * it as a seek rather than a volume change. */
+  bool progress = (npSpMode == 3) ||
+                  (npSpMode == 1 && (spaKnobProgress() || spaScrub));
   npFrameStart();
   if (progress) {
     if (syDurationMs > 0)
@@ -5078,10 +5100,16 @@ static void spaRing() {
  * with nothing requiring B to be the larger of the two. Acceleration is opt-in
  * per rate, so a coarse rate can have it and a fine one need not. */
 static void spaScrubStep(int st, int mul) {
-  bool useB = btnIsDown(B_ENC);
+  bool held = btnIsDown(B_ENC);
+  /* Three rates, one of which is reachable at a time: free spin and shaft-held
+   * when the knob owns the playhead, and shaft-held when the volume owns it.
+   * Acceleration is opt-in per rate, and Hold Seek takes Rate B's opt-in --
+   * both are the shaft-held rate, just in different modes. */
+  bool volMode = !spaKnobProgress();
+  bool useB = held || volMode;
   bool acc = useB ? (spCfgScrubAcc == 2 || spCfgScrubAcc == 3)
                   : (spCfgScrubAcc == 1 || spCfgScrubAcc == 3);
-  long per = (long)(useB ? spCfgScrubB : spCfgScrubA);
+  long per = (long)(volMode ? spCfgScrubHold : held ? spCfgScrubB : spCfgScrubA);
   long d = (long)st * per * (acc ? (long)mul : 1L);
 
   if (!spaScrub) {
@@ -5098,7 +5126,7 @@ static void spaScrubStep(int st, int mul) {
   spaScrubB = useB;
   if (d > 0) spaScrubDir = 1;
   else if (d < 0) spaScrubDir = 2;
-  if (useB) spaEncTurned = true;      // this hold was a rate, not a click
+  if (held) spaEncTurned = true;      // this hold was a modifier, not a click
 }
 
 static void spaScrubSettle() {
@@ -5118,43 +5146,52 @@ static void spaTick() {
    * volume path would leave the scrub path measuring against a stale time. */
   int st = knobSteps();
   int mul = st ? knobAccelMul() : 1;
-  bool scrubMode = spaKnobProgress();
+  bool encD = btnIsDown(B_ENC);
 
-  if (st && scrubMode) {
-    if (spaScrubArmed()) spaScrubStep(st, mul);
-    st = 0;                            // consumed; volume must not see it
-  } else if (st && !spkIpSet()) {
-    st = 0;                            // no speaker and not scrubbing: discard
-  }
+  /* One knob, two things to drive, and the shaft button chooses. Without a
+   * speaker the playhead has the knob outright; with one the volume does, and
+   * holding the shaft borrows it for a seek. Either way the volume only sees
+   * detents nothing else claimed. */
   if (st) {
-    spaTarget = constrain(spaTarget + st * mul, spkUserMin(), spkUserMax());
-    spaChangeMs = spaUserMs = millis();
-    spaUserActive = true;
-    spkQuiet(900);
+    if (spaScrubArmed())                  spaScrubStep(st, mul);
+    else if (encD && spaHoldSeekArmed())  spaScrubStep(st, mul);
+    else if (spkIpSet() && !spaKnobProgress()) {
+      spaTarget = constrain(spaTarget + st * mul, spkUserMin(), spkUserMax());
+      spaChangeMs = spaUserMs = millis();
+      spaUserActive = true;
+      spkQuiet(900);
+    }
   }
   spaScrubSettle();
 
-  /* In scrub mode the shaft button is a rate selector as well as play/pause,
-   * so the click has to be decided on RELEASE: acting on the press would
-   * toggle playback every time the user reached for the second rate. A hold
-   * that moved the knob was a rate and nothing else. */
-  if (scrubMode && spCfgEncBtn != 1) {          // 1 is hold-to-mute, unaffected
-    bool encD = btnIsDown(B_ENC);
-    if (encD && !spaEncPrev) spaEncTurned = false;
-    if (!encD && spaEncPrev && !spaEncTurned) {
-      if (spCfgEncBtn == 0 && spaCentreMode() == 2) {
-        if (spCfgTransport == 0) {
-          syProgressMs = syProgressNow();
-          syFetchMs = millis();
-          syIsPlaying = !syIsPlaying;
-          syHoldLocal(2500);
-          syCmd = syIsPlaying ? 5 : 6;
-          syMarkPending();
-        } else netCmd = 3;
-      } else if (spCfgEncBtn == 2) spaSendNext();
-    }
-    spaEncPrev = encD;
-  } else spaEncPrev = false;
+  /* The shaft button is a modifier as well as a button, so what a press MEANS
+   * is not known until it is released: a hold that moved the knob was a seek,
+   * and firing its click as well would toggle playback every time the user
+   * reached to scrub. Mute is the same story from the other side -- it fires
+   * on a hold, and a hold that seeks is not a request to silence the room. */
+  if (encD && !spaEncPrev) spaEncTurned = false;
+  if (spCfgEncBtn == 1) {                       // Mute: hold-only, for safety
+    if (encD) {
+      if (!spaHoldFired && !spaEncTurned &&
+          btnHeldFor(B_ENC) >= (uint32_t)encCfgHoldMs) {
+        spaHoldFired = true;
+        if (spkIpSet()) { netCmd = 4; spkQuiet(400); }
+      }
+    } else spaHoldFired = false;
+  } else if (!encD && spaEncPrev && !spaEncTurned) {
+    if (spCfgEncBtn == 0 && spaCentreMode() == 2) {
+      if (spCfgTransport == 0) {
+        syProgressMs = syProgressNow();
+        syFetchMs = millis();
+        syIsPlaying = !syIsPlaying;
+        syHoldLocal(2500);
+        syCmd = syIsPlaying ? 5 : 6;
+        syMarkPending();
+      } else netCmd = 3;
+    } else if (spCfgEncBtn == 2) spaSendNext();
+  }
+  spaEncPrev = encD;
+
   if (spaUserActive && elapsed(spaUserMs, (uint32_t)spCfgUserHold))
     spaUserActive = false;
 
@@ -5183,16 +5220,6 @@ static void spaTick() {
   // ---- remote change: just adopt it ------------------------------------
   if (!turning && !spaPending && spkIpSet() && spkVol != spaTarget) {
     spaTarget = spaSent = spkVol;
-  }
-
-  // ---- shaft button ----------------------------------------------------
-  if (spCfgEncBtn == 1) {            // Mute is hold-only, for safety
-    if (btnIsDown(B_ENC)) {
-      if (!spaHoldFired && btnHeldFor(B_ENC) >= (uint32_t)encCfgHoldMs) {
-        spaHoldFired = true;
-        if (spkIpSet()) { netCmd = 4; spkQuiet(400); }
-      }
-    } else spaHoldFired = false;
   }
 
   // ---- press-and-hold scrubbing ----------------------------------------
@@ -5296,27 +5323,10 @@ static void spaButton(BtnId b, BtnEv e) {
       syCmd = syIsPlaying ? 5 : 6;
       syMarkPending();
     } else netCmd = 3;
-  } else if (b == B_ENC) {
-    /* Mute (option 1) deliberately does NOT act on a click -- spaTick fires
-     * it after a hold instead, so a stray press cannot silence the room.
-     * In scrub mode the play/pause click is decided on release, also in
-     * spaTick, because the same button selects the second scrub rate. */
-    if (spaKnobProgress() && spCfgEncBtn != 1) return;
-    if (spCfgEncBtn == 0) {
-      if (spaCentreMode() == 2) {
-        if (spCfgTransport == 0) {
-          syProgressMs = syProgressNow();
-          syFetchMs = millis();
-          syIsPlaying = !syIsPlaying;
-          syHoldLocal(2500);
-          syCmd = syIsPlaying ? 5 : 6;
-          syMarkPending();
-        } else netCmd = 3;
-      }
-    } else if (spCfgEncBtn == 2) {
-      spaSendNext();
-    }
   }
+  /* B_ENC is deliberately absent here. It doubles as the seek modifier, so
+   * its meaning depends on whether the knob moved during the hold -- which
+   * only spaTick knows. It decides on release. */
 }
 
 /* Layout: top half is the track title, then a quarter for the artist, then a
