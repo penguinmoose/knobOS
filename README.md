@@ -15,10 +15,6 @@ configuration via NVS, battery monitoring, and sleep.
 ---
 
 ## Hardware
-
-> *This section is a summary. Precise wiring, part numbers and photos are
-> maintained above/below by hand — expand as needed.*
-
 | Part | Notes |
 |---|---|
 | **Unexpected Maker FeatherS2** | ESP32-S2, 8MB PSRAM. **PSRAM must be enabled** (Spotify does not work without it) |
@@ -39,7 +35,7 @@ configuration via NVS, battery monitoring, and sleep.
 | Button C (top) | 33 | OLED FeatherWing |
 | I²C SDA / SCL | 8 / 9 | UM variant pinout — **not** the Adafruit ESP32-S2 Feather's |
 | NeoPixel data | 7 | |
-| VBAT sense | 3 | ADC1_CH2, **external divider required** |
+| VBAT sense | 3 | ADC1_CH2, **1:1 voltage divider** with 0.1uf ceramic cap pin 3 to ground |
 | 5V present (from external USB port) | 10 | 5.1k:10k divider, RTC-capable so it can wake from deep sleep |
 
 Hardware notes:
