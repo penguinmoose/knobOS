@@ -18,7 +18,7 @@ configuration via NVS, battery monitoring, and sleep.
 ---
 
 ## Hardware
-![Inside the device, a 21700 battery, UM FeatherS2 connected to a FeatherWing display on the front, EC11 encoder, etc.](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/inside.png)
+![Inside the device, a 21700 battery, UM FeatherS2 connected to a FeatherWing display on the front, EC11 encoder, etc.](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/inside-labeled.png)
 | Part | Notes |
 |---|---|
 | **Unexpected Maker FeatherS2** | ESP32-S2, 8MB PSRAM. **PSRAM must be enabled** (Spotify does not work without it) |
