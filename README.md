@@ -1,11 +1,14 @@
 # KnobOS
 **Current version: 10.6**
 
-A handheld device project with a rotary knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a mini-app operating system called KnobOS.
+A handheld sound controller with a rotary encoder knob, neopixel ring backlighting, and 128x64 monochrome display with three buttons. It runs a miniapp operating system called KnobOS.
 
-It has two functional miniapps: Speaker control, and Mixer control. Using the Mixer miniapp, it can control a **Midas M32R** mixing
-console over OSC. With the Speaker miniapp, it can control the volume of a Sony soundbar over Sony's local HTTP API, and
-**Spotify** over the Web API all in one app, displaying the live song progress and details too!
+| ![Knob device in mixer mode](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/mixer.png) | ![Speaker miniapp - Spotify only](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/spotify-only.png) | ![Speaker miniapp - Spotify + speaker](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/spotify-and-speaker.png)|
+| ----------- | ----------- | ----------- |
+| Mixer app | Speaker app with Spotify only | Speaker app with smart speaker connected|
+
+Using the Mixer miniapp, it can control a **Midas M32R** mixing
+console over OSC. With the Speaker miniapp, it can control **Spotify** over the Web API and display the current song, and also control the volume of a Sony soundbar that Spotify is connected to. In the Speaker miniapp, the knob can seek as well as adjust the volume of the speaker (if there is a speaker connected).
 
 The system also includes a nav stack, a settings miniapp, persistent
 configuration via NVS, battery monitoring, and sleep.
@@ -15,6 +18,7 @@ configuration via NVS, battery monitoring, and sleep.
 ---
 
 ## Hardware
+![Inside the device, a 21700 battery, UM FeatherS2 connected to a FeatherWing display on the front, EC11 encoder, etc.](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/inside.png)
 | Part | Notes |
 |---|---|
 | **Unexpected Maker FeatherS2** | ESP32-S2, 8MB PSRAM. **PSRAM must be enabled** (Spotify does not work without it) |
@@ -39,11 +43,11 @@ configuration via NVS, battery monitoring, and sleep.
 | 5V present (from external USB port) | 10 | 5.1k:10k divider, RTC-capable so it can wake from deep sleep |
 
 Hardware notes:
-- **The plain FeatherS2 has no on-board battery divider.** The *Neo* has one on
-  IO2 and the FeatherS3 on GPIO2; the original board does not. Two equal
-  resistors (e.g. 2× 100k) from BAT to GPIO 3 are required. The ratio and both
-  voltage endpoints are configurable in Settings.
-- **A 3.3V data line drives WS2812s fine at battery voltage.** Their logic-high
+- **The plain FeatherS2 has no on-board battery divider.** Two equal
+  resistors (e.g. 2× 68k) from BAT to GPIO 3 are required. A lower resistance value like 5-10k may be desired for more accurate readings, but will drain the battery more. The most ideal configuration would be to use a P-ch MOSFET to switch the battery gauge voltage divider. The ratio and both battery voltage endpoints are configurable in Settings.
+- I installed the NeoPixel ring to point downwards, hidden inside the empty space in the large rotary encoder knob. See [this picture](https://raw.githubusercontent.com/penguinmoose/knobOS/refs/heads/main/img/neopixel-mounting.png).
+- The NeoPixels draw a small amount of quiescent current, around 10mA total, which can drain the battery over time. Optionally but ideally, switch the NeoPixels using a P-ch MOSFET to cut power to the NeoPixels every time the device is on light or deep sleep.
+- A 3.3V data line drives NeoPixel WS2812s fine at battery voltage. Their logic-high
   threshold is 0.7 × VDD, ≈2.6V at 3.7V. At 5V it would be 3.5V, which is why
   level shifters are usually needed and aren't here.
 - Connect EC11 `+` to **3V3, never 5V** because the S2 is not 5V tolerant.
